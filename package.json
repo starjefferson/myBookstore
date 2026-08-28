@@ -1,0 +1,31 @@
+{
+  "name": "digital-concierge-bookstore",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "seed": "node scripts/seed.js",
+    "scrape": "node scripts/scrape.js",
+    "cleanup:invalid-books": "node scripts/cleanup-invalid-books.js"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "firebase": "^10.14.1",
+    "firebase-admin": "^14.3.0",
+    "lucide-react": "^0.454.0",
+    "next": "^14.2.15",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "resend": "^4.0.0",
+    "tailwind-merge": "^2.5.4"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.20",
+    "playwright": "^1.48.2",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.14"
+  }
+}

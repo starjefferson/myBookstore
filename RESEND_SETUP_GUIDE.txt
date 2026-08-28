@@ -1,0 +1,194 @@
+MY BOOKS — RESEND EMAIL NOTIFICATIONS GUIDE
+============================================
+
+PURPOSE
+-------
+Resend is the email delivery service for MY BOOKS. It sends branded emails
+from the bookstore to:
+
+1. The operations team when a customer pays or submits a custom book request.
+2. The customer when their order/request is received.
+3. The customer when the vendor supplies dispatch details.
+4. The customer when the vendor/courier confirms delivery.
+
+Resend does not read emails from Rovingheights, Retala, or a courier. Those
+messages arrive in the team's business inbox. A team member reads the update,
+finds the corresponding order in /admin, updates its status, and the app uses
+Resend to send the customer an update.
+
+
+THE OPERATIONS FLOW
+-------------------
+
+PAID CATALOG ORDER
+
+Customer checks out and pays with Paystack
+    -> The app verifies the Paystack payment on the server
+    -> The app creates one paid order in Firestore
+    -> Resend emails the operations team: "New paid order"
+    -> Resend emails the buyer: "We received your order"
+    -> Team buys the exact item from Rovingheights or Retala using:
+         - the buyer's name, phone number, and delivery address
+         - the team's business email address for vendor updates
+    -> Vendor sends dispatch/tracking details to the team's business inbox
+    -> Team opens /admin, marks the order as ordered/dispatched, and enters
+       any tracking details received from the vendor
+    -> Resend emails the buyer with the vendor-provided dispatch details
+    -> Vendor/courier emails the team that delivery is complete
+    -> Team marks the order as Delivered in /admin
+    -> Resend emails the buyer that delivery has been confirmed
+
+CUSTOM BOOK REQUEST
+
+Customer submits a book request from /order-request
+    -> The request is saved in Firestore with status "order_requested"
+    -> Resend emails the operations team: "New book request"
+    -> Resend emails the customer: "We received your request"
+    -> Team contacts the customer if the book can be sourced and confirms the
+       price/payment process manually.
+
+
+WHAT THE APP ALREADY DOES
+-------------------------
+
+The existing route app/api/send-shipping-email/route.js and helper
+lib/resend.js are for dispatch notifications. When an admin enters a courier
+name and tracking/waybill number in /admin, the app can send a branded email
+to the buyer's saved buyerEmail address.
+
+The following emails still need to be added to complete the notification flow:
+
+1. Internal operations alert for each verified paid order.
+2. Internal operations alert for each custom book request.
+3. Buyer order-received confirmation after a verified paid order.
+4. Buyer request-received confirmation after a custom book request.
+5. Buyer delivered confirmation after an admin marks the order Delivered.
+
+
+RESEND ACCOUNT SETUP
+--------------------
+
+1. Create an account at https://resend.com
+
+2. In Resend, add and verify a sending domain that you own, for example:
+   mybooks.ng
+
+3. Resend will provide DNS records. Add them at the company where your domain
+   is managed. These normally include SPF and DKIM records. Wait until Resend
+   shows the domain as verified.
+
+4. Choose a sender address on that verified domain, for example:
+   orders@mybooks.ng
+   hello@mybooks.ng
+
+5. Create a Resend API key. Give it sending permission only where possible.
+
+6. Add these variables to the hosting provider's Production environment
+   settings (for example, Vercel Project -> Settings -> Environment Variables):
+
+   RESEND_API_KEY=re_your_real_resend_api_key
+   RESEND_FROM_EMAIL=orders@mybooks.ng
+   ADMIN_NOTIFICATION_EMAIL=you@yourteamemail.com
+
+   Never place RESEND_API_KEY in a NEXT_PUBLIC_ variable. It must stay on the
+   server and must never be pasted into browser code or committed to Git.
+
+7. Add the same values to .env.local for local development. Do not commit
+   .env.local to source control.
+
+
+SENDER AND RECIPIENT RULES
+--------------------------
+
+FROM ADDRESS
+The app sends from RESEND_FROM_EMAIL, e.g. orders@mybooks.ng. It must use a
+domain verified in Resend. The default onboarding@resend.dev sender is suitable
+only for early testing and has recipient restrictions.
+
+TEAM ALERT RECIPIENT
+The app sends internal alerts to ADMIN_NOTIFICATION_EMAIL. This can be one
+email address at launch. Later it can be a group mailbox such as
+orders@mybooks.ng or multiple team addresses.
+
+CUSTOMER RECIPIENT
+The app sends buyer notifications to buyerEmail stored on the order. Checkout
+requires the email address before payment. The custom request form also
+requires it.
+
+
+ADMIN DASHBOARD PROCESS
+-----------------------
+
+1. Sign in at https://your-domain.com/admin using the authorized Firebase
+   admin account.
+
+2. In "Paid (Needs Sourcing)", open the order and use its vendor link to buy
+   the book manually from Rovingheights or Retala.
+
+3. Enter the buyer's delivery address and phone number on the vendor site.
+   Use the team's business email for vendor receipts, dispatch emails, and
+   delivery confirmations.
+
+4. When the vendor supplies tracking information, select the order in /admin,
+   mark it as ordered/dispatched, enter the vendor/courier name and tracking
+   number, then send the buyer update.
+
+5. When the team receives a delivery-confirmation email from the vendor or
+   courier, locate the order in /admin and mark it Delivered. The app should
+   then send the buyer a delivery-confirmation email.
+
+Do not invent tracking numbers. Only send the tracking information supplied by
+the vendor or courier.
+
+
+RECOMMENDED EMAIL SUBJECTS
+--------------------------
+
+To the team:
+  New paid order #ORD-... — action required
+  New custom book request — action required
+
+To the buyer:
+  We received your MY BOOKS order #ORD-...
+  We received your book request
+  Your MY BOOKS order has been dispatched
+  Delivery confirmed for order #ORD-...
+
+
+TESTING CHECKLIST
+-----------------
+
+[ ] Verify the sender domain in Resend.
+[ ] Set RESEND_API_KEY, RESEND_FROM_EMAIL, and ADMIN_NOTIFICATION_EMAIL.
+[ ] Deploy the environment-variable changes.
+[ ] Place one Paystack test order using an inbox you can access.
+[ ] Confirm the team receives the internal paid-order alert.
+[ ] Confirm the buyer receives the order-received confirmation.
+[ ] In /admin, add a test vendor dispatch update and confirm the buyer receives
+    the dispatch email.
+[ ] Mark the test order Delivered and confirm the buyer receives the delivery
+    confirmation.
+[ ] Submit a custom book request and confirm both the team and customer emails.
+
+
+FREE PLAN AND LAUNCH GUIDANCE
+-----------------------------
+
+Resend's free transactional-email plan is suitable for an MVP. Check current
+limits and pricing before launch at https://resend.com/pricing. Start with
+email notifications; SMS and WhatsApp normally have per-message costs and
+additional setup requirements.
+
+
+SECURITY AND PRIVACY
+--------------------
+
+- Keep API keys server-side only.
+- Send customers only the information they need: their order, status, and any
+  vendor-provided dispatch details.
+- Do not expose vendor invoices, source purchase receipts, supplier prices, or
+  supplier order links to buyers.
+- Ensure Firebase/Firestore access rules protect customer addresses and phone
+  numbers.
+- Use a real monitored team inbox for ADMIN_NOTIFICATION_EMAIL so a person can
+  act on every order alert.

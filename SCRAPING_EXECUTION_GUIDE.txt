@@ -1,0 +1,283 @@
+================================================================================
+DIGITAL CONCIERGE BOOKSTORE — SCRAPING & SEEDING EXECUTION GUIDE
+Target Vendors:
+
+Masobe Books      -> https://masobebooks.com/shop/
+
+Rovingheights     -> https://rhbooks.com.ng/product-category/fiction/
+
+Retala Books      -> https://retala.com.ng/
+
+Script Locations: /scripts/scrape.js & /scripts/seed.js
+Runtime: Node.js (JavaScript) + Playwright Headless Browser + Firebase Admin SDK
+
+TABLE OF CONTENTS
+How the Scraper Works & Margin Calculation Engine
+
+Development Setup & Local Execution (Scrape & Seed Workflow)
+
+Production Execution Options (GitHub Actions, VPS Cron, Worker Containers)
+
+Syncing Scraped Catalog & Seed Data with Firebase Firestore
+
+Troubleshooting, Rate Limits & Selector Resilience
+
+================================================================================
+
+HOW THE SCRAPER WORKS & MARGIN CALCULATION ENGINE
+================================================================================
+The scraper (scripts/scrape.js) executes headless Chromium via Playwright, navigates
+to each target vendor catalog, extracts book titles, author metadata, cover image URLs,
+product source links, and vendor prices, and computes the concierge retail listing price:
+
+Retail Price = Vendor Price * (1 + RETAIL_MARKUP_PERCENT)
+(Default markup is 25%, rounded up to the nearest ₦100)
+
+Key Script Features & Fixes:
+
+Dynamic Scrape Limits: Full page crawling support or capped via process.env.SCRAPE_LIMIT
+(default: 50 items per vendor).
+
+Dynamic Selector Strategy: Replaced deprecated waitForTimeout calls with explicit locator
+assertions (waitForSelector) to prevent runtime lag.
+
+Author Metadata Extraction: Dynamically parses vendor DOM elements (.author, .byline)
+for author names before defaulting to generic publisher tags.
+
+Dual Persistence: Writes to local scraped_catalog.json and performs direct batch
+upserts to Firestore if firebase-admin credentials are configured.
+
+Output format saved to scraped_catalog.json:
+[
+{
+"id": "retala-the-cost-of-being-a-girl",
+"title": "The Cost of Being a Girl",
+"author": "Khadija Abdalla",
+"description": "Authentic literary edition of "The Cost of Being a Girl" sourced directly via Retala.",
+"coverImage": "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&q=80&w=800",
+"vendorPrice": 4500,
+"retailPrice": 5700,
+"sourceVendor": "retala",
+"sourceUrl": "https://retala.com.ng",
+"category": "African Literature",
+"inStock": true,
+"rating": 4.8,
+"updatedAt": "2026-08-24T17:30:00.000Z"
+}
+]
+
+================================================================================
+2. DEVELOPMENT SETUP & LOCAL EXECUTION
+Follow these steps to run the scraper and seeder on your local machine:
+
+Step 2.1: Install Dependencies & Browsers
+npminstall npx playwright install chromium
+
+Step 2.2: Configure Environment Credentials
+Create or update .env.local in your root directory:
+FIREBASE_PROJECT_ID=your-project-id
+FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxx@your-project-id.iam.gserviceaccount.com
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n..."
+SCRAPE_LIMIT=10
+
+Step 2.3: Run Scraper in Terminal
+Execute the scrape script to generate scraped_catalog.json:
+$ node scripts/scrape.js
+
+Step 2.4: Execute Database Seeder
+Write static shipping zones (lib/zones.js), mock orders (lib/mockData.js), and
+scraped books (scraped_catalog.json) to your Firestore database:
+$ node scripts/seed.js
+
+Step 2.5: Visual / Headed Debugging (Optional)
+To watch the browser navigate and inspect selectors visually during development, update
+scripts/scrape.js:
+headless: false,
+slowMo: 500 // slows down execution by 500ms for visual inspection
+
+================================================================================
+3. PRODUCTION EXECUTION OPTIONS
+OPTION A: GITHUB ACTIONS (RECOMMENDED — AUTOMATED OFF-PEAK SYNC)
+Configure .github/workflows/scrape-catalog.yml to run off-peak nightly and
+update Firestore directly via Firebase Admin SDK.
+
+YAML
+name: Nightly Catalog & Seed Sync
+
+on:
+  schedule:
+    # Runs twice weekly at 02:00 UTC (off-peak)
+    - cron: '0 2 * * 1,4'
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+jobs:
+  scrape-and-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Scraper & Sync Firestore
+        env:
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
+          FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
+          SCRAPE_LIMIT: 100
+        run: node scripts/scrape.js
+
+      - name: Seed Auxiliary Firestore Tables
+        env:
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
+          FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
+        run: node scripts/seed.js
+
+      - name: Commit Scraped Catalog Snapshot (Optional)
+        run: |
+          git config --global user.name 'Concierge Scraper Bot'
+          git config --global user.email 'bot@conciergebooks.ng'
+          git add scraped_catalog.json
+          git commit -m 'chore(catalog): auto-sync vendor catalogs [skip ci]' || exit 0
+          git push
+OPTION B: LINUX VPS / CLOUD SERVER CRONTAB (e.g., Ubuntu / Debian)
+If hosting on a VPS (DigitalOcean, AWS EC2, Linode, Hetzner):
+
+SSH into your server:
+$ ssh user@your-server-ip
+
+Edit server crontab:
+$ crontab -e
+
+Add the cron job entry to run on Monday and Thursday at 2:00 AM:
+0 2 * * 1,4 cd /var/www/myBookstore && /usr/bin/node scripts/scrape.js >> /var/log/bookstore_scraper.log 2>&1
+
+OPTION C: CLOUD WORKER / CONTAINER (Render, Railway, Fly.io)
+Deploy a lightweight Docker container service:
+
+Base image: [mcr.microsoft.com/playwright:v1.48.2-jammy](https://mcr.microsoft.com/playwright:v1.48.2-jammy)
+
+Command: node scripts/scrape.js && node scripts/seed.js
+
+Schedule: Twice weekly, on Monday and Thursday at 02:00 UTC.
+
+================================================================================
+4. SYNCING SCRAPED CATALOG & SEED DATA WITH FIREBASE FIRESTORE
+The application utilizes a decoupled background process: catalog scraping runs
+offline into Firestore, enabling your Next.js UI to query database records instantly.
+
+Environmental Authentication:
+firebase-admin initializes using project credentials (FIREBASE_PROJECT_ID,
+FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY).
+
+Catalog Ingestion (scrape.js & seed.js):
+
+Scraper writes catalog records into scraped_catalog.json and syncs directly
+to Firestore when admin environment keys are loaded.
+
+seed.js imports static shipping zones (lib/zones.js), initial mock orders
+(lib/mockData.js), and scraped_catalog.json, executing batch writes to
+Firestore collections (shippingZones, books, orders).
+
+Non-Destructive Merging:
+Batch writes use { merge: true } mode (docRef.set(data, { merge: true })).
+This preserves custom descriptions, ratings, and order statuses while updating
+prices, vendor URLs, and stock availability.
+
+================================================================================
+5. HOW SCRAPED BOOKS REACH THE FRONTEND
+The scraper and frontend are separate processes. The frontend does not read
+scraped_catalog.json directly in the browser.
+
+Rendering Flow:
+
+Vendor websites
+  -> scripts/scrape.js
+  -> scraped_catalog.json
+  -> Firestore books collection
+  -> app/api/catalog/route.js
+  -> /api/catalog
+  -> lib/dataService.js
+  -> app/page.js
+  -> BookCard components
+  -> user's screen
+
+API Routes:
+
+app/api/catalog/route.js exposes:
+  GET /api/catalog
+    Returns the full books collection as JSON.
+  GET /api/catalog?id=BOOK_ID
+    Returns one book document as JSON.
+
+app/api/catalog-version/route.js exposes:
+  GET /api/catalog-version
+    Returns the single Firestore document catalogMeta/current. This document
+    contains the version written by the scraper or seeder after a catalog
+    update.
+
+Caching:
+
+lib/dataService.js checks browser localStorage first. If the local catalog is
+less than 3 days old, the homepage renders from localStorage and makes no
+catalog request. After 3 days it checks /api/catalog-version. If the version
+has not changed, the old local catalog remains. If the version has changed,
+the browser requests /api/catalog and replaces its local catalog.
+
+app/api/catalog/route.js uses a Next.js server cache for 3 days, keyed by the
+catalog version. Its Cache-Control header also allows a production CDN to
+reuse the response. Therefore many users can share one server/CDN response
+instead of each reading every book from Firestore.
+
+Firestore reads happen when the server cache does not contain the requested
+catalog version, or when a missing individual book is requested. Cache expiry
+does not run a timer and does not query Firestore by itself; a request must
+arrive first.
+
+The important files to study are:
+  1. scripts/scrape.js       collects and cleans vendor data
+  2. scripts/seed.js         uploads scraped_catalog.json
+  3. app/api/catalog/route.js serves Firestore books as JSON
+  4. app/api/catalog-version/route.js serves the catalog version
+  5. lib/dataService.js       manages localStorage and refresh decisions
+  6. app/page.js              renders the homepage book grid
+
+================================================================================
+6. TROUBLESHOOTING, RATE LIMITS & BEST PRACTICES
+Anti-Bot Protection & Execution Politeness:
+
+Uses realistic Chromium User-Agent headers and --no-sandbox flags.
+
+Scrape jobs should run no more frequently than once every 12 to 24 hours off-peak.
+
+Deprecated Timing API Replacement:
+
+Fixed page.waitForTimeout() calls have been replaced with DOM element locator
+wait strategies (await page.waitForSelector('.product')) to prevent unnecessary script delays.
+
+Vendor Error Isolation:
+
+scrapeMasobe, scrapeRovingheights, and scrapeRetala run inside independent
+try/catch blocks. A downtime or markup change on one site will not crash
+scraping for the remaining vendors.
+
+Handling Class Name Layout Changes:
+
+If a vendor updates their frontend layout and returns 0 items, run the script in
+headed mode (headless: false) locally to visually identify new CSS classes and
+update .querySelector() selectors in scripts/scrape.js.
+
+================================================================================
+Support: Concierge Engineering Team concierge@yourdomain.com

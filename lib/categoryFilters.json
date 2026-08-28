@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "lastUpdated": "2026-08-27T18:51:21.088Z",
+  "categories": [
+    {
+      "id": "books",
+      "name": "Books",
+      "count": 2798
+    },
+    {
+      "id": "fiction",
+      "name": "Fiction",
+      "count": 1758
+    }
+  ]
+}

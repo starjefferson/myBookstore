@@ -1,0 +1,390 @@
+DIGITAL CONCIERGE BOOKSTORE
+GITHUB ACTIONS SCRAPE AND FIRESTORE SETUP GUIDE
+
+================================================================================
+WHAT THIS AUTOMATION DOES
+================================================================================
+
+This project has two separate commands:
+
+  node scripts/scrape.js
+
+This visits the configured vendor websites and saves the collected catalog to:
+
+  scraped_catalog.json
+
+  node scripts/seed.js
+
+This reads scraped_catalog.json and uploads those books to Firebase Firestore.
+
+GitHub Actions runs these commands automatically on a temporary GitHub computer:
+
+  1. Download the repository code.
+  2. Install Node.js and project packages.
+  3. Install Playwright's Chromium browser.
+  4. Run scrape.js.
+  5. If scraping succeeds, run seed.js.
+  6. Save a copy of the scraped JSON as a workflow artifact.
+
+The workflow is located at:
+
+  .github/workflows/catalog-sync.yml
+
+The current workflow scrapes Rovingheights and Retala. Masobe is disabled because
+its website currently returns 403 Forbidden to the scraper.
+
+================================================================================
+IMPORTANT: LOCAL DEVELOPMENT STILL WORKS
+================================================================================
+
+Yes. You can continue running the commands locally exactly as before.
+
+From the project folder, use:
+
+  node --env-file=.env.local scripts/scrape.js
+
+After checking the generated scraped_catalog.json, upload it manually with:
+
+  node --env-file=.env.local scripts/seed.js
+
+The npm equivalents are:
+
+  npm run scrape
+  npm run seed
+
+However, because the npm scripts do not include --env-file, use the explicit node
+commands above unless your environment variables are already loaded another way.
+
+The recommended local workflow is:
+
+  1. Run scrape.js.
+  2. Wait for "Scraping complete".
+  3. Inspect scraped_catalog.json for book count, vendor, and author values.
+  4. Run seed.js only when the catalog is correct.
+
+The scraper does not write to Firestore. The seeder is the only command that writes
+the catalog to Firestore.
+
+================================================================================
+BEFORE SETTING UP GITHUB ACTIONS
+================================================================================
+
+You need:
+
+  - A GitHub account.
+  - This project pushed to a GitHub repository.
+  - The repository must contain package.json and package-lock.json.
+  - A Firebase project with Firestore enabled.
+  - Firebase Admin credentials for server-side Firestore access.
+
+Never commit .env.local, Firebase private keys, or service-account JSON files to
+GitHub. Anyone who gets the private key may be able to access your database.
+
+================================================================================
+PART 1: PUSH THE PROJECT TO GITHUB
+================================================================================
+
+If the project is not already on GitHub:
+
+  1. Go to https://github.com and sign in.
+  2. Click the + button in the top-right corner.
+  3. Select New repository.
+  4. Give it a name, for example digital-concierge-bookstore.
+  5. Choose Private unless you deliberately want the source code public.
+  6. Create the repository.
+
+From the project folder in PowerShell, check the current Git state:
+
+  git status
+
+If Git has not been initialized yet:
+
+  git init
+  git add .
+  git commit -m "Initial bookstore project"
+  git branch -M main
+  git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
+  git push -u origin main
+
+If Git is already initialized, do not run git init again. Add the GitHub remote
+shown on the repository page, then push your existing branch.
+
+Before pushing, confirm that .gitignore excludes secrets:
+
+  .env.local
+  .env*
+  !.env.example
+  node_modules/
+  .next/
+
+================================================================================
+PART 2: ADD GITHUB ACTIONS SECRETS
+================================================================================
+
+The workflow needs three repository secrets. These are different from normal
+GitHub login credentials.
+
+  FIREBASE_PROJECT_ID
+  FIREBASE_CLIENT_EMAIL
+  FIREBASE_PRIVATE_KEY
+
+To add them:
+
+  1. Open the GitHub repository in your browser.
+  2. Click Settings.
+  3. In the left menu, open Secrets and variables.
+  4. Click Actions.
+  5. Click New repository secret.
+  6. Enter the exact secret name.
+  7. Paste the matching value.
+  8. Click Add secret.
+  9. Repeat for all three values.
+
+Use the values already in your local .env.local:
+
+  FIREBASE_PROJECT_ID=...
+  FIREBASE_CLIENT_EMAIL=...
+  FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n..."
+
+For FIREBASE_PRIVATE_KEY, paste the complete private key, including:
+
+  -----BEGIN PRIVATE KEY-----
+  -----END PRIVATE KEY-----
+
+Do not paste the variable name into the value field. The value field should contain
+only the value. GitHub masks secrets in normal logs, but do not print them yourself.
+
+================================================================================
+PART 3: CHECK THE WORKFLOW FILE
+================================================================================
+
+The repository now contains:
+
+  .github/workflows/catalog-sync.yml
+
+Its important settings are:
+
+  SCRAPE_MASOBE: "false"
+  SCRAPE_FRESH: "true"
+  SCRAPE_AUTHORS: "true"
+
+This means:
+
+  - Masobe is skipped.
+  - Each scheduled run starts a new clean catalog.
+  - Rovingheights author lookups are enabled.
+  - Retala author lookups are enabled.
+
+The workflow runs at 02:00 UTC on Monday and Thursday. GitHub Actions
+uses UTC, not your local Nigerian time. The schedule may start a few minutes late.
+
+It also has workflow_dispatch, which gives you a button for starting a run manually.
+
+================================================================================
+PART 4: RUN IT MANUALLY THE FIRST TIME
+================================================================================
+
+Do this before waiting for the schedule:
+
+  1. Push the workflow file to GitHub:
+
+       git add .github/workflows/catalog-sync.yml
+       git commit -m "Add catalog sync workflow"
+       git push
+
+  2. Open the repository on GitHub.
+  3. Click the Actions tab.
+  4. Select Catalog Scrape and Seed in the left column.
+  5. Click Run workflow.
+  6. Select the main branch.
+  7. Click the green Run workflow button.
+  8. Click the new run to see its progress.
+
+A successful run should show these stages:
+
+  - Check out repository
+  - Set up Node.js
+  - Install dependencies
+  - Install Playwright Chromium
+  - Scrape vendor catalogs
+  - Seed Firestore
+  - Upload catalog snapshot
+
+The Seed Firestore step runs only if the scrape step succeeds. This prevents an
+incomplete scrape from being uploaded.
+
+================================================================================
+HOW TO READ THE ACTIONS LOG
+================================================================================
+
+Click any step to expand its log.
+
+During scraping, expected output includes messages such as:
+
+  Vendors: Rovingheights, Retala
+  Page 1/50
+  Checkpoint saved: ... books
+  Scraping complete. Run npm run seed when the catalog is ready.
+
+The checkpoint messages refer to local files on the temporary GitHub runner. They
+protect progress if the scraper process fails while that one job is still running.
+They are not permanent across separate GitHub jobs.
+
+After scraping completes, seed.js reads the final scraped_catalog.json and writes
+the books to Firestore. Firestore writes are split into groups below 500 operations.
+
+================================================================================
+VIEWING THE GENERATED CATALOG
+================================================================================
+
+The GitHub runner is temporary, so its files are not automatically committed to
+your repository. The workflow uploads these files as an artifact:
+
+  scraped_catalog.json
+  lib/categoryFilters.json
+
+To download them:
+
+  1. Open the completed workflow run.
+  2. Scroll to the bottom of the run summary.
+  3. Find Artifacts.
+  4. Download the scraped-catalog artifact.
+
+The artifact is retained for 14 days by the current workflow.
+
+================================================================================
+WHAT HAPPENS IF THE ACTION FAILS
+================================================================================
+
+If scraping fails:
+
+  - The Seed Firestore step does not run.
+  - Firestore is not changed by that workflow run.
+  - The artifact may contain the partial local JSON if it was created.
+  - Open the failed step log and find the first real error.
+
+If seeding fails:
+
+  - The scrape may have completed successfully.
+  - Firestore may contain some committed batches if the failure happened midway.
+  - Run the workflow again after correcting credentials or network problems.
+  - The seeder uses merge writes, so repeating it updates the same document IDs.
+
+GitHub-hosted runners are temporary. If a run is terminated, a later run starts with
+a clean runner. It does not automatically resume from the exact page where the old
+runner stopped. The current workflow deliberately uses SCRAPE_FRESH=true so an old
+catalog checked into the repository cannot be mistaken for current progress.
+
+Exact cross-run page resume would require storing the catalog cursor in durable
+external storage such as Firebase, a database, or object storage. That is not needed
+for the current clean full-run workflow.
+
+================================================================================
+FIRESTORE SAFETY AND DUPLICATES
+================================================================================
+
+The scraper collects the complete list locally first. The workflow then runs seed.js.
+The seeder uses each book's ID as its Firestore document ID and uses merge writes.
+Running the seeder again updates those documents rather than creating a second copy
+with a random ID.
+
+The seeder does not automatically delete Firestore books that disappeared from a
+vendor website. If you need a true replacement catalog, old documents must be
+removed deliberately or a cleanup step must be added after reviewing the new list.
+
+Deleting Firestore collections and documents consumes Firestore operations. Repeated
+seeding also consumes write operations, so avoid repeatedly starting Actions runs
+while debugging selectors or author extraction.
+
+================================================================================
+LOCAL DEVELOPMENT VS PRODUCTION
+================================================================================
+
+LOCAL DEVELOPMENT
+
+Use this when testing selectors, author parsing, or vendor availability:
+
+  node --env-file=.env.local scripts/scrape.js
+
+Review the resulting JSON, then:
+
+  node --env-file=.env.local scripts/seed.js
+
+PRODUCTION GITHUB ACTIONS
+
+Use the Actions workflow when you want a scheduled automated update. GitHub supplies
+the Firebase environment variables from repository secrets, so no .env.local file
+is needed on the runner.
+
+The two environments use the same scripts. The difference is where credentials and
+execution happen:
+
+  Local:      .env.local on your computer
+  Production: GitHub Actions repository secrets
+
+================================================================================
+TEMPORARILY CHANGE THE VENDORS OR SETTINGS
+================================================================================
+
+The normal workflow skips Masobe. To enable Masobe in production, edit the workflow
+and change:
+
+  SCRAPE_MASOBE: "false"
+
+to:
+
+  SCRAPE_MASOBE: "true"
+
+Only do this after confirming that Masobe permits automated access and no longer
+returns 403 to the runner.
+
+To disable author lookups temporarily while diagnosing network problems, change:
+
+  SCRAPE_AUTHORS: "false"
+
+This is faster, but missing authors will be saved as Unknown Author. Restore true
+for the normal catalog run.
+
+================================================================================
+QUICK CHECKLIST
+================================================================================
+
+  [ ] Project is pushed to a GitHub repository.
+  [ ] Repository is private or intentionally public.
+  [ ] .env.local is not committed.
+  [ ] package-lock.json is committed.
+  [ ] FIREBASE_PROJECT_ID secret exists.
+  [ ] FIREBASE_CLIENT_EMAIL secret exists.
+  [ ] FIREBASE_PRIVATE_KEY secret exists.
+  [ ] Actions workflow appears in the Actions tab.
+  [ ] First run was started manually.
+  [ ] Scrape step completed.
+  [ ] Seed Firestore step completed.
+  [ ] Firestore books collection was checked.
+  [ ] Downloaded artifact was checked.
+
+================================================================================
+NORMAL COMMANDS SUMMARY
+================================================================================
+
+Local scrape only:
+
+  node --env-file=.env.local scripts/scrape.js
+
+Local scrape with a fresh catalog:
+
+  $env:SCRAPE_FRESH="true"
+  node --env-file=.env.local scripts/scrape.js
+  Remove-Item Env:SCRAPE_FRESH -ErrorAction SilentlyContinue
+
+Local manual Firestore seed:
+
+  node --env-file=.env.local scripts/seed.js
+
+Production:
+
+  Open GitHub -> Actions -> Catalog Scrape and Seed -> Run workflow
+
+================================================================================
+END OF GUIDE
+================================================================================

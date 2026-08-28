@@ -1,0 +1,216 @@
+DIGITAL CONCIERGE BOOKSTORE
+VENDOR-ONLY CATALOG SCRAPING AND FIRESTORE SETUP GUIDE
+
+================================================================================
+OVERVIEW
+================================================================================
+
+The catalog is scraped directly from the configured Nigerian book vendors. No
+Google Books API is used.
+
+Active vendors:
+  Rovingheights: https://rhbooks.com.ng/shop-2/
+  Retala:        https://retala.com.ng/product-category/books/
+
+Optional vendor:
+  Masobe:        https://masobebooks.com/ng/bookstore/page/1/
+  Enable with SCRAPE_MASOBE=true when the site is accessible.
+
+Vendor pages provide the catalog fields. The scraper collects titles, vendor
+authors, vendor cover images, vendor links, vendor prices, categories, and stock
+signals. Product detail pages are visited for missing author information when
+SCRAPE_AUTHORS is not set to false.
+
+Only records with a valid vendor product URL are saved. Catalog-page URLs,
+placeholders, empty links, and invalid URLs are rejected before author lookup,
+checkpoint writing, or Firestore seeding.
+
+Category cards accidentally saved by an older scraper can be removed safely with:
+
+  npm run cleanup:invalid-books
+
+This command deletes only Firestore book records whose title or sourceUrl fails
+the same validation used by the scraper. It does not delete valid books, orders,
+shipping zones, or the complete books collection.
+
+The existing image lazy-loading fix is retained. Image extraction checks data-src,
+data-lazy-src, data-original, srcset, and src in that order.
+
+================================================================================
+PRICE AND STOCK RULES
+================================================================================
+
+Vendor price is read from the vendor page and stored internally in Nigerian Naira.
+Retail price is calculated as:
+
+  Retail Price = Vendor Price x 1.10
+
+The result is rounded up to the nearest N100. Books with no valid vendor price are
+skipped instead of receiving a fabricated fallback price.
+
+Price parsing reads the first explicit Naira/NGN amount from the vendor price
+element. It does not concatenate sale prices, review counts, ratings, product IDs,
+or other numbers that may also appear in that element.
+
+Vendor price is retained for internal fulfillment and order accounting. It is not
+shown in the storefront, cart, checkout, admin catalog, or dashboard UI.
+
+Stock status is read from each vendor card. Listings containing terms such as
+Out of stock, Sold out, Unavailable, Not available, or Coming soon are marked
+inStock=false.
+
+================================================================================
+REQUIREMENTS AND INSTALLATION
+================================================================================
+
+Requirements:
+  - Node.js 20 or newer
+  - Firebase Firestore project
+  - Firebase Admin service-account credentials
+  - Playwright Chromium
+
+Install from the project root:
+
+  npm install
+  npx playwright install chromium
+
+================================================================================
+ENVIRONMENT VARIABLES
+================================================================================
+
+Create .env.local in the project root. Keep it out of source control.
+
+FIREBASE_PROJECT_ID=your-project-id
+FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxx@your-project-id.iam.gserviceaccount.com
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nYOUR_KEY\n-----END PRIVATE KEY-----\n"
+
+Optional controls:
+  SCRAPE_FRESH=true                 Ignore checkpoint and start from page 1
+  SCRAPE_MASOBE=true                Include Masobe
+  SCRAPE_AUTHORS=false              Skip vendor product-detail author visits
+  AUTHOR_LOOKUP_CONCURRENCY=2       Concurrent vendor detail-page visits
+  SCRAPE_NAVIGATION_RETRIES=3       Attempts per vendor page
+  SCRAPE_NAVIGATION_TIMEOUT=30000   Navigation timeout in milliseconds
+  SCRAPE_SELECTOR_TIMEOUT=15000     Product selector wait in milliseconds
+
+================================================================================
+PLAYWRIGHT VISITS AND WAITS
+================================================================================
+
+scripts/scrape.js uses these vendor URLs:
+  - Rovingheights page 1: https://rhbooks.com.ng/shop-2/
+  - Rovingheights later:  https://rhbooks.com.ng/shop-2/page/{N}/
+  - Retala page 1:        https://retala.com.ng/product-category/books/
+  - Retala later:         https://retala.com.ng/product-category/books/?paged={N}
+  - Masobe page N:        https://masobebooks.com/ng/bookstore/page/{N}/
+
+Each catalog page is visited with:
+  1. waitUntil=domcontentloaded
+  2. A short network-idle wait for lazy content
+  3. A product-card selector wait
+  4. Up to three navigation attempts by default
+
+Failed Rovingheights pages are skipped so later pages can continue. Failed Retala
+pages stop that pagination pass, preserving the last successful checkpoint.
+
+================================================================================
+SCRAPE, CHECKPOINT, RESUME, AND SEED
+================================================================================
+
+Run a normal incremental scrape:
+
+  npm run scrape
+
+After the price-parser fix, rebuild the existing inflated snapshot once:
+
+  $env:SCRAPE_FRESH="true"
+  npm run scrape
+  npm run seed
+  Remove-Item Env:SCRAPE_FRESH -ErrorAction SilentlyContinue
+
+The scraper cannot recover the original vendor price from an already inflated
+number in an old JSON or Firestore record. A fresh vendor scrape is required.
+
+The scraper reads scraped_catalog.json before starting. It detects the highest
+saved page per vendor and resumes from the next page. After each successfully
+scraped page it writes a checkpoint to:
+
+  scraped_catalog.json
+  lib/categoryFilters.json
+
+If a run stops, run npm run scrape again and it resumes from the saved page. To
+replace the snapshot completely, use PowerShell:
+
+  $env:SCRAPE_FRESH="true"
+  npm run scrape
+  Remove-Item Env:SCRAPE_FRESH -ErrorAction SilentlyContinue
+
+Review scraped_catalog.json before uploading it. Then seed Firestore:
+
+  npm run seed
+
+The seeder writes books to Firestore collection books and updates
+catalogMeta/current. It also writes the existing shipping-zone records.
+
+The browser catalog cache remains fresh for 3 days. The scheduled vendor scrape
+runs twice weekly, on Monday and Thursday at 02:00 UTC.
+
+Customers can submit a custom request from the Place an Order link in the navbar.
+Requests may be for books absent from the catalog. They are stored in the orders
+collection with orderType=request and status=order_requested, then appear in the
+admin portal under the Order Requests filter. No payment is taken at request time.
+
+================================================================================
+VERIFYING THE RESULT
+================================================================================
+
+Check each record for:
+  - sourceVendor equal to rovingheights or retala
+  - sourceUrl pointing to the vendor product page
+  - vendorPrice and retailPrice
+  - coverImage from the vendor lazy-load attributes
+  - author and category when present
+  - inStock matching the vendor listing
+
+Start the app after seeding:
+
+  npm run dev
+
+Open http://localhost:3000. Confirm that catalog cards, book details, cart totals,
+and checkout shipping totals work. Only retail prices and shipping fees should be
+visible to customers.
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Zero books:
+  - Confirm the vendor site is reachable in a browser.
+  - Check the selector and navigation messages in the terminal.
+  - Use SCRAPE_FRESH=true after changing scraper settings.
+
+Category names appear as books:
+  - Run npm run cleanup:invalid-books once to remove old invalid Firestore records.
+  - Run with SCRAPE_FRESH=true to rebuild scraped_catalog.json using product URLs.
+
+Missing covers:
+  - Confirm the vendor card has data-src, data-lazy-src, data-original, srcset,
+    or src. The scraper checks all five attributes.
+
+Missing authors:
+  - Leave SCRAPE_AUTHORS enabled. Product detail pages are visited for cards
+    without author text.
+  - The author lookup uses the validated vendor product URL and checks structured
+    data, author selectors, metadata, and vendor tags.
+  - Increase AUTHOR_LOOKUP_CONCURRENCY carefully if the vendor allows it.
+
+Resume starts too late:
+  - The checkpoint intentionally resumes after the highest saved page per vendor.
+  - Set SCRAPE_FRESH=true to rebuild the snapshot.
+
+Firestore errors:
+  - Check FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY.
+  - Confirm the service account has Firestore access.
+
+Do not add GOOGLE_BOOKS_API_KEY or any Google Books request to this pipeline.
+Never commit .env.local, private keys, or service-account JSON files.

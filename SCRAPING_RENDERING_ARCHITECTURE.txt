@@ -1,0 +1,443 @@
+DIGITAL CONCIERGE BOOKSTORE
+SCRAPING, FIRESTORE, SERVER CACHE, AND FRONTEND RENDERING
+======================================================================
+
+This document explains how the bookstore catalog moves from vendor websites
+into the application and eventually appears on a user's screen.
+
+
+1. THE MAIN PARTS
+----------------------------------------------------------------------
+
+There are five important parts:
+
+A. Vendor websites
+   Masobe Books, Rovingheights, and Retala contain the source catalog data.
+
+B. The scraper
+   File: scripts/scrape.js
+   Uses Playwright to visit vendor pages and collect book details.
+
+C. Firestore
+   Stores the shared catalog used by the application.
+   Main collection: books
+   Version document: catalogMeta/current
+
+D. Server API routes
+   Files:
+   - app/api/catalog/route.js
+   - app/api/catalog-version/route.js
+
+   These routes keep Firebase Admin credentials on the server. Browsers do
+   not connect directly to Firestore for the main catalog request.
+
+E. Browser frontend and localStorage
+   File: lib/dataService.js
+   The browser keeps a copy of the catalog in localStorage so normal page
+   loads do not repeatedly download all books.
+
+
+2. HOW A SCRAPE WORKS
+----------------------------------------------------------------------
+
+Command:
+
+    node scripts/scrape.js
+
+The scraper does the following:
+
+1. Loads Firebase credentials from .env.local.
+2. Opens vendor catalog pages with Playwright.
+3. Extracts fields such as:
+   - title
+   - author
+   - cover image
+   - price
+   - vendor
+   - source URL
+   - category. Cleaning the author does not remove
+or change the category or rating fields.
+   - rating
+4. Visits individual product pages when needed to find the author.
+5. Cleans the author value before saving it.
+6. Writes the complete fresh snapshot to scraped_catalog.json.
+7. Updates lib/categoryFilters.json.
+8. Upserts the scraped books into Firestore collection books.
+9. Updates Firestore document catalogMeta/current.
+
+The scraper uses Firestore upserts. An upsert means:
+
+- If the document ID already exists, its values are updated.
+- If the document ID does not exist, a new document is added.
+- Existing documents are not deleted automatically.
+
+This means a book removed from a vendor website can remain in Firestore unless
+it is deliberately cleaned up later.
+
+
+
+4. FIRESTORE STRUCTURE
+----------------------------------------------------------------------
+
+Firestore contains two important catalog areas:
+
+    books                         collection
+      book-id-1                   document
+      book-id-2                   document
+      ...
+
+    catalogMeta                   collection
+      current                     document
+
+The catalogMeta/current document contains metadata similar to:
+
+    {
+      version: "2026-08-26T12:00:00.000Z",
+      updatedAt: "2026-08-26T12:00:00.000Z",
+      bookCount: 1200
+    }
+
+catalogMeta/current is not a file in this project. It is a Firestore document.
+The scraper and seeder update it only after writing the catalog.
+
+The version is a small change signal. The browser can ask whether the catalog
+changed without reading every book document first.
+
+
+5. THE SERVER API ROUTES
+----------------------------------------------------------------------
+
+The route filename is required to be route.js by the Next.js App Router. The
+folder names provide the meaningful API names.
+
+A. Full catalog route
+
+    Development URL: http://localhost:3000/api/catalog
+    Production URL: https://your-production-domain.com/api/catalog
+    File: app/api/catalog/route.js
+
+The localhost address is only an example for local development. After
+deployment, replace localhost:3000 with the real domain. The route path stays
+the same: /api/catalog.
+
+The frontend does not hard-code localhost. It requests the relative path
+/api/catalog, so the browser automatically uses whichever domain currently
+serves the application.
+
+This route reads Firestore collection books through Firebase Admin and returns
+an array of books.
+
+It also accepts one optional query parameter:
+
+    /api/catalog?id=some-book-id
+
+With id present, it reads one book document instead of the entire collection.
+
+B. Catalog version route
+
+    Development URL: http://localhost:3000/api/catalog-version
+    Production URL: https://your-production-domain.com/api/catalog-version
+    File: app/api/catalog-version/route.js
+
+The production domain replaces localhost:3000, but the route path remains
+/api/catalog-version.
+
+This route reads only:
+
+    catalogMeta/current
+
+It returns the current catalog version and metadata. It does not read the full
+books collection.
+
+The route names are therefore:
+
+    /api/catalog          full catalog or one requested book
+    /api/catalog-version  small catalog change check
+
+
+6. SERVER CACHE AND CDN CACHE
+----------------------------------------------------------------------
+
+There is no server-cache file stored in the project.
+
+The server cache is created at runtime by Next.js in:
+
+    app/api/catalog/route.js
+
+The catalog function uses unstable_cache with a 24-hour revalidation period.
+The cache is keyed by the catalog version sent in the request. Conceptually:
+
+    catalog version A -> cached catalog A
+    catalog version B -> cached catalog B
+
+This prevents a new scrape from being trapped behind the old catalog cache.
+When the version changes, the request URL changes and Next.js creates or uses a
+separate cache entry for the new version.
+
+The HTTP response also includes cache headers for a production CDN:
+
+    s-maxage=86400
+    stale-while-revalidate=3600
+
+Meaning:
+
+- A CDN may serve the catalog response for up to 3 days.
+- During stale-while-revalidate, it may serve an older response while fetching
+  a newer one in the background.
+
+On localhost there may be no external CDN. Next.js still handles its server
+cache. After deployment, the hosting provider may add a CDN cache.
+
+The five-minute setting is not used for the full catalog. The full catalog is
+3 days. The version endpoint's response is also configured with a 3-day
+CDN cache header.
+
+
+7. BROWSER localStorage CACHE
+----------------------------------------------------------------------
+
+The browser-side logic is in:
+
+    lib/dataService.js
+
+The catalog is stored under a localStorage key similar to:
+
+    concierge_books_db_v2
+
+The version check data is stored under:
+
+    concierge_books_version_v1
+
+The browser also tracks when it last checked the catalog version.
+The local cache interval is 3 days:
+
+    CATALOG_CHECK_INTERVAL = 3 * 24 * 60 * 60 * 1000
+
+This creates a separate cache on every browser and every origin. For example:
+
+    http://localhost:3000  has one localStorage cache
+    http://localhost:3001  has a different localStorage cache
+
+A user's phone has its own cache. Another user's laptop has another cache.
+
+
+8. EXACT HOMEPAGE LOADING FLOW
+----------------------------------------------------------------------
+
+The homepage is rendered by:
+
+    app/page.js
+
+It calls:
+
+    fetchBooks()
+
+The decision process is:
+
+STEP 1: Read browser localStorage.
+
+If the local catalog exists and its last check is less than 3 days old:
+
+    localStorage -> homepage
+
+No catalog API request is made.
+No Firestore catalog read is made.
+
+STEP 2: If the browser cache is older than 3 days, request:
+
+    /api/catalog-version
+
+This checks catalogMeta/current. It is only one small document read on the
+server when the cached API response is unavailable.
+
+STEP 3: Compare versions.
+
+If the remote version equals the browser's saved version:
+
+    keep localStorage catalog
+    update checkedAt
+    do not request the full catalog
+
+If the remote version is different:
+
+    request /api/catalog?version=NEW_VERSION
+
+STEP 4: The server handles the full catalog request.
+
+If the versioned server cache already exists:
+
+    server cache -> browser
+
+If it does not exist:
+
+    Firestore books collection -> server cache -> browser
+
+STEP 5: The browser saves the returned list in localStorage.
+
+Future page loads use this local copy until the 24-hour check interval expires.
+
+
+9. DAILY UPDATE EXAMPLE
+----------------------------------------------------------------------
+
+Assume the scraper runs at 2:00 AM once per day.
+
+At 2:00 AM:
+
+    scraper reads vendor sites
+    scraper writes changed/new books to books
+    scraper updates catalogMeta/current to version B
+
+At 8:00 AM, User 1 opens the site:
+
+    localStorage is older than 3 days
+    browser checks catalogMeta/current
+    sees version B instead of version A
+    requests /api/catalog?version=B
+    server reads Firestore only if catalog B is not cached
+    browser saves catalog B locally
+
+At 8:01 AM, User 2 opens the site:
+
+    User 2 may have no local cache
+    User 2 requests the version and catalog
+    server/CDN can serve the already cached catalog B
+    User 2 does not need a separate full Firestore read
+
+At 8:02 AM through the rest of the day:
+
+    returning users use localStorage
+    new users receive the shared server/CDN catalog cache
+    Firestore is not read once per user
+
+If no user requests a catalog after the server cache expires, Firestore is not
+queried merely because time passed. A request is needed before a cache refresh
+happens.
+
+
+10. WHAT CAUSES FIRESTORE READS
+----------------------------------------------------------------------
+
+Full catalog reads occur when a request reaches /api/catalog and the server's
+versioned catalog cache does not already contain the requested version.
+
+A single book read occurs when:
+
+    /api/catalog?id=BOOK_ID
+
+is requested and the requested book is not already available in localStorage.
+
+The version document is read when the server handles /api/catalog-version and
+its own response cache is unavailable or expired.
+
+The old expensive pattern was a full books collection query from the browser
+or server on every page load. That could read thousands of documents repeatedly.
+
+The newer pattern is:
+
+    normal reload              zero catalog Firestore reads
+    daily version check         one small manifest read
+    changed catalog             one shared full catalog read
+    missing individual book     one book document read
+
+A large number of brand-new users can still cause a full catalog download if
+they arrive after a server cache has been cleared or on separate server
+instances. The server/CDN cache greatly reduces this compared with one full
+Firestore query per user, but no cache can guarantee zero reads in every
+possible deployment.
+
+
+11. WHAT HAPPENS WHEN FIRESTORE QUOTA IS EXHAUSTED
+----------------------------------------------------------------------
+
+If Firestore returns a quota or permission error:
+
+- Users with an existing local catalog can continue using that local data.
+- A user with no local catalog cannot download the fresh Firestore catalog.
+- The current data service may fall back to INITIAL_BOOKS from lib/mockData.js
+  when no local catalog is available.
+- The server cache may continue serving a catalog that was already cached.
+
+Writes from scraping and seeding consume Firestore write quota. Full collection
+reads consume document-read quota. Deleting a collection also requires reads to
+find documents and writes/deletes to remove them, so cleanup can itself be
+expensive.
+
+
+12. HOW TO CLEAR THE BROWSER CATALOG CACHE
+----------------------------------------------------------------------
+
+Open the exact origin being used, for example:
+
+    http://localhost:3000
+
+Open DevTools Console and run:
+
+    localStorage.removeItem("concierge_books_db_v2");
+    localStorage.removeItem("concierge_books_version_v1");
+    location.reload();
+
+Or use DevTools:
+
+    Application -> Local Storage -> http://localhost:3000 -> Clear all
+
+Clearing localhost:3001 does not clear localhost:3000.
+Clearing browser localStorage does not delete Firestore records.
+
+
+13. HOW TO SEED THE CURRENT JSON FILE
+----------------------------------------------------------------------
+
+If scraped_catalog.json is already fresh:
+
+    node scripts/seed.js
+
+This reads scraped_catalog.json and upserts its records into books. It also
+updates catalogMeta/current after the book batch completes.
+
+To scrape vendor sites and then update Firestore:
+
+    node scripts/scrape.js
+
+The scraper creates the fresh scraped_catalog.json first, then updates
+Firestore.
+
+The normal daily process is therefore:
+
+    node scripts/scrape.js
+
+Do not run both commands if you only need one complete scrape-and-publish run.
+
+
+14. IMPORTANT CURRENT LIMITATION
+----------------------------------------------------------------------
+
+Upsert-only syncing does not remove books that disappeared from the vendor
+catalog. It adds new books and updates matching IDs, but old documents remain.
+That is intentional for the current design because deleting on every scrape was
+not wanted and deletion activity can consume quota.
+
+If old books must eventually be removed, that should be a separate, deliberate
+cleanup operation, preferably after quota is available and with a carefully
+planned list of IDs to remove.
+
+
+15. SHORT SUMMARY
+----------------------------------------------------------------------
+
+Vendor websites
+    -> scripts/scrape.js
+    -> scraped_catalog.json
+    -> Firestore books collection
+    -> Firestore catalogMeta/current version document
+
+User browser
+    -> localStorage first
+    -> once per 3 days check catalogMeta/current through /api/catalog-version
+    -> if changed request /api/catalog?version=VERSION
+    -> Next.js server cache/CDN serves the shared catalog
+    -> Firestore is read only when that shared cache needs the requested version
+
+The browser cache makes normal reloads fast. The manifest tells the browser when
+fresh data exists. The server/CDN cache prevents every new user from performing
+a separate full Firestore read.
