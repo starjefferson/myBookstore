@@ -47,7 +47,7 @@ export default function BookDetailPage() {
         setRelatedBooks(all.filter((b) => b.id !== params.id).slice(0, 4));
       } catch (err) {
         console.error("Error loading book detail", err);
-      } font-medium {
+      } finally {
         setLoading(false);
       }
     };
