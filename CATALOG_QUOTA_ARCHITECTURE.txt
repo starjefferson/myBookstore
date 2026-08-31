@@ -1,0 +1,200 @@
+DIGITAL CONCIERGE BOOKSTORE
+CATALOG CACHE, FIRESTORE QUOTA, AND SCALE ARCHITECTURE
+=======================================================
+
+Purpose
+-------
+
+The catalog is intentionally served through application API routes rather than
+from Firestore directly in every browser. This keeps Firestore reads and costs
+predictable as the number of users grows.
+
+The design goal is:
+
+  - scrape and write a new catalog on the scheduled scrape cycle;
+  - let browsers reuse a local catalog for three days;
+  - share a server-side catalog cache between requests where possible; and
+  - ensure that users call the website API, never Firestore, for the public
+    catalog.
+
+
+CATALOG DATA FLOW
+-----------------
+
+  Vendor websites
+        |
+        v
+  scripts/scrape.js
+        |
+        +--> scraped_catalog.json
+        |
+        v
+  scripts/seed.js (or the configured scrape/seed job)
+        |
+        +--> Firestore: books collection
+        +--> Firestore: catalogMeta/current
+        |              { version, updatedAt, bookCount }
+        v
+  /api/catalog and /api/catalog-version
+        |
+        v
+  Browser IndexedDB: concierge_catalog_cache / catalog / current
+        |
+        v
+  Marketplace screen
+
+
+1. SCHEDULED SCRAPE AND FIRESTORE WRITES
+----------------------------------------
+
+The scheduled job collects books from the vendor sites. The seeder writes the
+result to the Firestore books collection in batches and then writes
+catalogMeta/current.
+
+catalogMeta/current is a small marker that tells the application which catalog
+snapshot is current. Its version is changed only after the book records have
+been written successfully.
+
+This means Firestore is changed by the scheduled backend workflow, not by
+catalog visitors. A visitor does not write the books collection or the catalog
+metadata document.
+
+The actual write frequency is the frequency of the scraper/seed job. If that
+job is scheduled every three days, Firestore catalog writes happen once each
+three-day cycle. If it runs twice weekly, the interval is approximately three
+to four days rather than exactly three days.
+
+
+2. A FIRST-TIME OR EXPIRED BROWSER VISIT
+----------------------------------------
+
+The browser calls fetchBooks() in lib/dataService.js.
+
+1. It reads IndexedDB database "concierge_catalog_cache", object store
+   "catalog", key "current".
+2. If no catalog exists, or its checkedAt timestamp is older than
+   CATALOG_CHECK_INTERVAL (currently three days), it calls:
+
+       GET /api/catalog-version
+
+3. The version route reads only catalogMeta/current when its server cache is
+   empty. This is one small Firestore document read, not a read of every book.
+4. The browser requests GET /api/catalog?version=<catalog-version>.
+5. The catalog route gets the books from its server cache when available. On a
+   server-cache miss it reads the books collection from Firestore once, returns
+   the JSON catalog, and holds that snapshot in its server cache for three days.
+6. The browser stores { books, version, checkedAt } in IndexedDB and displays
+   the result.
+
+No public-browser Firestore SDK catalog query is made in this path. Firebase
+Admin is used only inside the server routes.
+
+
+3. A NORMAL RETURN VISIT WITHIN THREE DAYS
+------------------------------------------
+
+1. fetchBooks() reads the browser's IndexedDB catalog.
+2. checkedAt is still within the three-day interval.
+3. The cached books are returned.
+4. No call is made to /api/catalog-version or /api/catalog.
+5. Therefore, this user visit consumes no Firestore read for the catalog.
+
+This per-browser cache is particularly valuable because thousands of repeat
+visitors can render the full book list without each downloading it again.
+
+
+4. WHAT HAPPENS AFTER A NEW SCRAPE
+----------------------------------
+
+The new data is in Firestore immediately after the scheduled seed completes.
+Browsers do not need to be notified in real time because the product accepts a
+three-day freshness window.
+
+When a browser's local three-day interval expires, it checks the version route.
+If the version differs from its IndexedDB version, it fetches the catalog and
+replaces its local snapshot. If the version is unchanged, it retains its books
+and refreshes checkedAt.
+
+Users can consequently see a catalog that is up to the chosen cache interval
+behind the most recently scraped data. This is the deliberate trade-off for
+minimal Firestore usage.
+
+
+5. IMPORTANT LIMITATION OF THE CURRENT SERVER CACHE
+---------------------------------------------------
+
+The current catalogCache and versionCache values in the API route files are
+in-memory JavaScript variables. They are shared only by requests handled by
+the same warm server process.
+
+They are NOT guaranteed to be one globally shared cache for every user:
+
+  - a server restart or cold start empties the cache;
+  - multiple serverless instances each have their own memory cache; and
+  - multiple deployment regions can each have their own memory cache.
+
+Therefore, "one Firestore collection read for every user worldwide in three
+days" is the target behavior, but is not guaranteed by in-process memory alone.
+The browser IndexedDB cache still saves most repeat-user reads, but a scalable
+shared cache needs durable, distributed storage.
+
+
+6. RECOMMENDED HARDENING FOR THOUSANDS OF USERS
+------------------------------------------------
+
+Use a managed shared cache such as Vercel KV, Upstash Redis, Cloudflare KV, or
+another Redis-compatible store for the catalog snapshot and its version.
+
+Recommended server-side behaviour:
+
+  cache key: catalog:<version>
+  cache key: catalog:current-version
+  TTL:       slightly longer than the expected three-day interval
+
+1. /api/catalog checks the shared cache first.
+2. On a hit it returns the cached JSON and never contacts Firestore.
+3. On a miss, one request acquires a short lock, reads Firestore, writes the
+   snapshot to the shared cache, and releases the lock.
+4. Other simultaneous requests wait briefly or use the newly populated cache.
+   This prevents a cache-miss stampede from producing many Firestore reads.
+5. The scheduled seed job updates Firestore, writes the new version, and then
+   invalidates or primes the shared cache.
+
+This makes the cache consistent across instances and regions, and is the most
+important improvement for predictable Firestore cost at high traffic.
+
+Further useful improvements:
+
+  - Serve catalog JSON with CDN caching (s-maxage plus stale-while-revalidate)
+    after authentication and privacy requirements have been considered.
+  - Store immutable snapshots under versioned URLs, for example
+    /api/catalog?version=2026-08-29T02:00:00.000Z. A CDN can cache each
+    version safely because it never changes.
+  - Prime the shared cache immediately after a successful seed, so the first
+    customer request never has to fill it.
+  - Monitor cache-hit rate, Firestore reads, API latency, cache failures, and
+    seed success. Alerts make unexpected quota growth visible early.
+  - Keep a last-known-good catalog snapshot in object storage or a static JSON
+    file for a graceful fallback if Firestore is temporarily unavailable.
+  - Add a service worker only if full offline application reloads are needed.
+    IndexedDB caches catalog data, but it does not cache the app HTML, scripts,
+    styles, or images by itself.
+
+
+QUOTA SUMMARY
+-------------
+
+Repeat visit within 3 days:
+  Browser IndexedDB read only; zero API and Firestore catalog reads.
+
+New browser / browser cache older than 3 days:
+  API requests are made. The server cache should serve the full catalog; only
+  a shared-cache miss should cause the server to read Firestore.
+
+Scheduled catalog update:
+  The backend writes the changed/new book documents and one metadata document.
+  These are the intentional catalog Firestore writes.
+
+The architecture reduces Firestore traffic from "one full catalog query per
+visitor" to "one shared catalog refresh per cache window, plus scheduled data
+writes" once the shared cache is made durable across server instances.

@@ -47,7 +47,7 @@ export default function BookDetailPage() {
         setRelatedBooks(all.filter((b) => b.id !== params.id).slice(0, 4));
       } catch (err) {
         console.error("Error loading book detail", err);
-      } finally {
+      } font-medium {
         setLoading(false);
       }
     };
@@ -55,6 +55,42 @@ export default function BookDetailPage() {
       loadData();
     }
   }, [params.id]);
+
+  // Track Meta Pixel (ViewContent) & Google Analytics (view_item) when book loads
+  useEffect(() => {
+    if (book && typeof window !== "undefined") {
+      const categoryName = classifyBookCategory(book);
+
+      // Meta Pixel ViewContent Event
+      if (window.fbq) {
+        window.fbq("track", "ViewContent", {
+          content_ids: [book.id],
+          content_name: book.title,
+          content_category: categoryName,
+          value: book.retailPrice,
+          currency: "NGN",
+          content_type: "product",
+        });
+      }
+
+      // GA4 view_item Event
+      if (window.gtag) {
+        window.gtag("event", "view_item", {
+          currency: "NGN",
+          value: book.retailPrice,
+          items: [
+            {
+              item_id: book.id,
+              item_name: book.title,
+              item_category: categoryName,
+              price: book.retailPrice,
+              quantity: 1,
+            },
+          ],
+        });
+      }
+    }
+  }, [book]);
 
   if (loading) {
     return (
@@ -93,12 +129,45 @@ export default function BookDetailPage() {
   const isMasobe = book.sourceVendor === "masobe";
   const bookCategory = classifyBookCategory(book);
 
+  const trackAddToCartEvent = () => {
+    if (typeof window !== "undefined") {
+      // Meta Pixel AddToCart
+      if (window.fbq) {
+        window.fbq("track", "AddToCart", {
+          content_ids: [book.id],
+          content_name: book.title,
+          content_type: "product",
+          value: book.retailPrice * quantity,
+          currency: "NGN",
+        });
+      }
+      // GA4 add_to_cart
+      if (window.gtag) {
+        window.gtag("event", "add_to_cart", {
+          currency: "NGN",
+          value: book.retailPrice * quantity,
+          items: [
+            {
+              item_id: book.id,
+              item_name: book.title,
+              item_category: bookCategory,
+              price: book.retailPrice,
+              quantity: quantity,
+            },
+          ],
+        });
+      }
+    }
+  };
+
   const handleBuyNow = () => {
+    trackAddToCartEvent();
     addToCart(book, quantity);
     router.push("/checkout");
   };
 
   const handleAdd = () => {
+    trackAddToCartEvent();
     addToCart(book, quantity);
     showToast(`Added ${quantity}x "${book.title}" to bag`, "success");
   };

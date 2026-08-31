@@ -1,0 +1,178 @@
+REDIS FOR THIS BOOKSTORE: BEGINNER GUIDE
+========================================
+
+Short answer: can the app launch now?
+----------------------------------------
+
+Yes. Launch the app with its current Firebase, API, browser IndexedDB, and
+in-memory API cache setup. Redis is NOT required for the app to work.
+
+Your current setup already prevents normal repeat visitors from querying
+Firestore for the catalog during their three-day browser-cache window. Add
+Redis later when traffic grows or monitoring shows unwanted catalog reads from
+the API to Firestore.
+
+Do not add Redis credentials to NEXT_PUBLIC_ environment variables. They must
+remain server-only secrets.
+
+
+WHAT REDIS IS
+-------------
+
+Redis is a very fast online key-value store. For this project it would be used
+as a SHARED CACHE, not as the source of truth for books.
+
+Firestore remains the source of truth:
+
+  Firestore = permanent catalog data written by the scheduled seed job.
+  Redis     = temporary shared copy of that catalog for fast API responses.
+  IndexedDB = temporary per-browser copy of that catalog for repeat visitors.
+
+Redis may automatically expire a cached value after a chosen time (for example,
+three days). If Redis is temporarily unavailable, the API should fall back to
+Firestore; customers should not lose access to the catalog.
+
+
+WHAT IS A SERVER INSTANCE?
+--------------------------
+
+A server instance is one running copy of your Next.js application on the
+hosting provider's computer infrastructure.
+
+Think of it as one cashier serving requests:
+
+  Browser A ----> Cashier/server instance 1
+  Browser B ----> Cashier/server instance 1
+
+For low traffic, both may be served by the same instance. The in-memory
+catalogCache variable in app/api/catalog/route.js is available to that one
+instance.
+
+At higher traffic, or after deployment/platform maintenance, the host can run
+more than one independent copy:
+
+  Browser A ----> server instance 1 ----> its own memory cache
+  Browser B ----> server instance 2 ----> its own memory cache
+  Browser C ----> server instance 3 ----> its own memory cache
+
+Those instances do not share JavaScript variables. A cache held in instance 1
+is invisible to instance 2 and 3. If each instance starts with an empty cache,
+each can make its own Firestore catalog query. A restart has the same effect:
+the running process stops, its memory is discarded, and the new process starts
+with an empty in-memory cache.
+
+This is normal hosting behaviour and is not an error in your app.
+
+Redis sits between every API instance and Firestore:
+
+  browser -> API instance 1 --\
+  browser -> API instance 2 ----> shared Redis cache -> Firestore
+  browser -> API instance 3 --/
+
+All instances can see the same Redis value, so a Firestore catalog read can
+populate the cache for all of them.
+
+
+HOW THIS FITS THE EXISTING ARCHITECTURE
+---------------------------------------
+
+Today:
+
+  1. Scraper/seed job writes books and catalogMeta/current to Firestore.
+  2. The public browser calls /api/catalog-version and /api/catalog, never
+     Firestore directly.
+  3. Browser IndexedDB holds a catalog for three days.
+  4. Each warm API instance keeps its own in-memory catalog cache.
+
+With Redis later:
+
+  1. The scraper/seed job still writes Firestore as it does today.
+  2. /api/catalog checks Redis before Firestore.
+  3. On a Redis cache hit, it returns the cached catalog; no Firestore read.
+  4. On a Redis cache miss, one API request reads Firestore and stores the
+     result in Redis with a three-day expiry.
+  5. Every API instance can then reuse that Redis copy.
+  6. Browsers still use IndexedDB exactly as they do now.
+
+Redis does not change the scraping frequency, Firestore write frequency, or
+the rule that clients only call your API.
+
+
+WHEN TO ADD IT
+--------------
+
+Add Redis when one or more of these becomes true:
+
+  - the app is deployed on serverless hosting and starts multiple instances;
+  - Firestore usage reports show more catalog reads than expected;
+  - catalog API traffic is large enough that cold starts/cache misses matter;
+  - you need predictable shared caching across regions.
+
+For an initial launch, deploy without Redis, enable Firebase quota/budget
+alerts, and review actual Firestore usage after real traffic arrives. That is
+the simplest and lowest-risk starting point.
+
+
+MANAGED REDIS OPTION: UPSTASH
+-----------------------------
+
+Upstash is a hosted Redis service that works well with serverless Next.js.
+It has a free tier at the time this guide was written. Check its current limits
+and price before creating an account:
+
+  https://upstash.com/pricing/redis
+
+The provider gives two private values, commonly named:
+
+  UPSTASH_REDIS_REST_URL
+  UPSTASH_REDIS_REST_TOKEN
+
+Add them to the deployment platform's server-side environment variables and
+to .env.local for local development. Never commit .env.local and never use a
+NEXT_PUBLIC_ prefix for either value.
+
+
+FUTURE IMPLEMENTATION CHECKLIST (DO NOT APPLY UNTIL NEEDED)
+-----------------------------------------------------------
+
+1. Create an Upstash Redis database in the region nearest the API deployment.
+2. Add the private credentials above to the host and .env.local.
+3. Install the official server-side package:
+
+       npm install @upstash/redis
+
+4. Create a server-only Redis helper, for example lib/redis.js.
+5. In /api/catalog:
+
+       a. Read catalog:<version> from Redis.
+       b. Return it on a cache hit.
+       c. On a miss, read Firestore, write the value with a TTL, and return it.
+
+6. In /api/catalog-version, cache the small metadata document too, using a
+   shorter TTL if needed.
+7. Add a short lock around catalog fills. This stops many simultaneous first
+   requests from all reading Firestore at once (a cache-miss stampede).
+8. After the seed job succeeds, either delete the old Redis catalog key or
+   write/prime the new versioned key.
+9. Keep the current in-memory cache as a tiny fast first layer if desired.
+10. Test these cases before deployment:
+
+       - Redis hit: no Firestore catalog query occurs.
+       - Redis miss: one Firestore read populates Redis.
+       - Redis unavailable: API falls back to Firestore.
+       - New seed version: API returns the new catalog after invalidation.
+       - Browser with IndexedDB cache: normal return visit makes no catalog API
+         request within its three-day window.
+
+
+COST AND COMMANDS
+-----------------
+
+Redis is not automatically free forever. A managed provider can offer a free
+tier, but requests, storage, and bandwidth have limits. Each API cache lookup
+usually counts as a Redis command. At high traffic, monitor those commands and
+set a budget/usage alert before moving to a paid plan.
+
+For this use case, Redis generally costs less than repeatedly reading hundreds
+or thousands of Firestore book documents, but the real choice should be based
+on actual Firebase and hosting metrics after launch.

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { cert, getApps, initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
+import crypto from "crypto";
 
 const getAdminDb = () => {
   if (!process.env.FIREBASE_PROJECT_ID || !process.env.FIREBASE_CLIENT_EMAIL || !process.env.FIREBASE_PRIVATE_KEY) {
@@ -69,12 +70,46 @@ export async function GET(request) {
 
 export async function POST(request) {
   try {
-    const { reference, order } = await request.json();
+    const secretKey = process.env.PAYSTACK_SECRET_KEY;
+    const bodyText = await request.text();
+    let body;
+
+    try {
+      body = JSON.parse(bodyText);
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON payload received" }, { status: 400 });
+    }
+
+    // 1. HMAC Signature Verification for Paystack Webhook calls
+    const paystackSignature = request.headers.get("x-paystack-signature");
+    if (paystackSignature && secretKey) {
+      const hash = crypto
+        .createHmac("sha512", secretKey)
+        .update(bodyText)
+        .digest("hex");
+
+      if (hash !== paystackSignature) {
+        return NextResponse.json({ error: "Invalid Paystack HMAC signature" }, { status: 401 });
+      }
+
+      // Quick acknowledge for automated webhook ping
+      if (body.event === "charge.success" && !body.order) {
+        return NextResponse.json({
+          success: true,
+          message: "Webhook HMAC signature verified successfully",
+          reference: body.data?.reference
+        });
+      }
+    }
+
+    // 2. Extract Reference & Order Data
+    const reference = body.reference || body.data?.reference;
+    const order = body.order || body.data?.metadata?.order;
+
     if (!reference || !order || !Number.isFinite(order.totalPaid) || order.totalPaid <= 0) {
       return NextResponse.json({ error: "A payment reference and valid order total are required" }, { status: 400 });
     }
 
-    const secretKey = process.env.PAYSTACK_SECRET_KEY;
     let transaction;
 
     if (!secretKey || secretKey.includes("sk_test_xxxx")) {
@@ -100,6 +135,7 @@ export async function POST(request) {
       return NextResponse.json({ error: "This Paystack transaction was not successful" }, { status: 400 });
     }
 
+    // 3. Database Idempotency Check via Payment Receipts
     const db = getAdminDb();
     const receiptId = reference.replace(/[^a-zA-Z0-9_-]/g, "");
     const receiptRef = db?.collection("paymentReceipts").doc(receiptId);
@@ -114,9 +150,7 @@ export async function POST(request) {
     let verifiedSubtotal = order.bookSubtotal;
     let verifiedShippingFee = order.shippingFee;
 
-    // In live mode, pricing comes from Firestore, never from the browser. This
-    // prevents an altered checkout payload from attaching a valid payment to a
-    // different or under-priced catalog order.
+    // 4. Server-Side Firestore Price & Zone Rate Verification
     if (db) {
       if (!Array.isArray(order.items) || order.items.length === 0 || !order.destinationState) {
         return NextResponse.json({ error: "Order items and destination state are required" }, { status: 400 });
@@ -150,6 +184,7 @@ export async function POST(request) {
         .where("state", "==", order.destinationState)
         .limit(1)
         .get();
+
       if (zones.empty) {
         return NextResponse.json({ error: "The selected delivery destination is unavailable" }, { status: 400 });
       }
@@ -185,6 +220,7 @@ export async function POST(request) {
       updatedAt: new Date().toISOString()
     };
 
+    // 5. Atomic Order Creation via Firestore Transaction
     if (db) {
       const orderRef = db.collection("orders").doc(confirmedOrder.id);
       const savedOrder = await db.runTransaction(async (firestoreTransaction) => {

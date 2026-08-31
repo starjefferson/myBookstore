@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useCart } from "../../contexts/CartContext";
@@ -48,6 +48,35 @@ export default function CheckoutPage() {
   const pendingPaymentRef = useRef(null);
   const isConfirmingPayment = useRef(false);
 
+  const shippingFee = selectedZone?.fee || 2000;
+  const totalAmount = subtotal + shippingFee;
+
+  // Track Meta Pixel & GA4 "InitiateCheckout" on page view
+  useEffect(() => {
+    if (items.length > 0 && typeof window !== "undefined") {
+      if (window.fbq) {
+        window.fbq("track", "InitiateCheckout", {
+          content_ids: items.map((i) => i.id),
+          num_items: totalItems,
+          value: totalAmount,
+          currency: "NGN",
+        });
+      }
+      if (window.gtag) {
+        window.gtag("event", "begin_checkout", {
+          currency: "NGN",
+          value: totalAmount,
+          items: items.map((i) => ({
+            id: i.id,
+            name: i.title,
+            price: i.retailPrice,
+            quantity: i.quantity || 1,
+          })),
+        });
+      }
+    }
+  }, [items.length, totalAmount, totalItems]);
+
   // Update zone when state changes
   useEffect(() => {
     const zone = getZoneByState(formData.state);
@@ -80,9 +109,6 @@ export default function CheckoutPage() {
     }
   }, [user]);
 
-  const shippingFee = selectedZone?.fee || 2000;
-  const totalAmount = subtotal + shippingFee;
-
   const handleChange = (e) => {
     const { name, value } = e.target;
     setFormData((prev) => {
@@ -94,7 +120,7 @@ export default function CheckoutPage() {
     });
   };
 
-  const confirmPaymentAndCreateOrder = async (pendingPayment) => {
+  const confirmPaymentAndCreateOrder = useCallback(async (pendingPayment) => {
     if (!pendingPayment || isConfirmingPayment.current) return;
 
     isConfirmingPayment.current = true;
@@ -112,9 +138,34 @@ export default function CheckoutPage() {
         throw new Error(result.error || "We could not confirm your payment yet.");
       }
 
-      // The API creates the canonical Firestore record when configured. This keeps
-      // the offline/demo dashboard in sync and safely upserts by payment reference.
       const newOrder = await createOrder(result.order);
+
+      // Fire Meta Pixel & GA4 Purchase Conversion Events
+      if (typeof window !== "undefined") {
+        if (window.fbq) {
+          window.fbq("track", "Purchase", {
+            value: newOrder.totalPaid || totalAmount,
+            currency: "NGN",
+            content_ids: (newOrder.items || []).map((i) => i.bookId || i.id),
+            content_type: "product",
+            num_items: (newOrder.items || []).length,
+          });
+        }
+        if (window.gtag) {
+          window.gtag("event", "purchase", {
+            transaction_id: newOrder.paymentReference || newOrder.id,
+            value: newOrder.totalPaid || totalAmount,
+            currency: "NGN",
+            items: (newOrder.items || []).map((i) => ({
+              id: i.bookId || i.id,
+              name: i.title,
+              price: i.retailPrice,
+              quantity: i.quantity || 1,
+            })),
+          });
+        }
+      }
+
       clearCart();
       if (typeof window !== "undefined") {
         localStorage.removeItem("guest_checkout_info");
@@ -131,10 +182,9 @@ export default function CheckoutPage() {
       isConfirmingPayment.current = false;
       setProcessing(false);
     }
-  };
+  }, [clearCart, showToast, totalAmount]);
 
-  // A successful Paystack popup can be closed or interrupted before its callback
-  // finishes. Retain and retry that confirmation on the next checkout visit.
+  // Check for interrupted/pending payments on mount
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -146,7 +196,7 @@ export default function CheckoutPage() {
     } catch (err) {
       console.error("Failed to restore pending payment confirmation", err);
     }
-  }, []);
+  }, [confirmPaymentAndCreateOrder]);
 
   const handlePayNow = async (e) => {
     e.preventDefault();
@@ -313,7 +363,7 @@ export default function CheckoutPage() {
               </div>
             </div>
 
-            <form onSubmit={handlePayNow} className="space-y-5">
+            <form id="checkout-form" onSubmit={handlePayNow} className="space-y-5">
               {/* Name & Phone */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
@@ -521,8 +571,8 @@ export default function CheckoutPage() {
                 </div>
               )}
               <button
-                type="button"
-                onClick={handlePayNow}
+                type="submit"
+                form="checkout-form"
                 disabled={processing || items.length === 0}
                 className="w-full mt-6 py-3.5 px-6 rounded-2xl bg-sky-500 hover:bg-sky-400 text-white font-bold text-sm shadow-xl shadow-sky-500/25 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
