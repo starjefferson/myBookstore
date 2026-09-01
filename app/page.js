@@ -168,6 +168,7 @@ function MarketplacePageContent() {
                 <div className="text-xs text-zinc-400 font-medium">Zone Shipping Rates</div>
               </div>
               <div>
+                <div className="text-xl sm:text-2xl font-bold font-mono text-sky-400">Updates</div>
                 <div className="text-xs text-zinc-400 font-medium">Dispatched by Email</div>
               </div>
             </div>
