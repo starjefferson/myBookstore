@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { Suspense, useState, useEffect, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import { fetchBooks } from "../lib/dataService";
 import { BOOK_CATEGORIES, classifyBookCategory } from "../lib/categoryTaxonomy";
@@ -30,7 +30,7 @@ const shuffleBooks = (books) => {
   return shuffled;
 };
 
-export default function MarketplacePage() {
+function MarketplacePageContent() {
   const searchParams = useSearchParams();
   const [books, setBooks] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -303,5 +303,13 @@ export default function MarketplacePage() {
         )}
       </section>
     </div>
+  );
+}
+
+export default function MarketplacePage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-[#090A0F] text-zinc-100" /> }>
+      <MarketplacePageContent />
+    </Suspense>
   );
 }

@@ -26,6 +26,8 @@ const getAdminDb = () => {
 let catalogCache = null;
 let catalogCacheVersion = null;
 
+export const dynamic = "force-dynamic";
+
 const CATALOG_CACHE_TTL = 3 * 24 * 60 * 60 * 1000;
 
 export async function GET(request) {

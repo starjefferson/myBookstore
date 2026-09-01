@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "../contexts/AuthContext";
@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import AuthModal from "./AuthModal";
 
-export default function Navbar() {
+function NavbarContent() {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -193,5 +193,13 @@ export default function Navbar() {
       {/* Auth Modal */}
       <AuthModal isOpen={authModalOpen} onClose={() => setAuthModalOpen(false)} />
     </>
+  );
+}
+
+export default function Navbar() {
+  return (
+    <Suspense fallback={<header className="sticky top-0 z-40 h-16 w-full border-b border-zinc-800/80 bg-[#090A0F]/90 backdrop-blur-md" />}>
+      <NavbarContent />
+    </Suspense>
   );
 }
