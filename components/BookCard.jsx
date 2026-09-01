@@ -8,7 +8,7 @@ import { useCart } from "../contexts/CartContext";
 import { useToast } from "./Toast";
 import { formatNGN } from "../lib/zones";
 import { classifyBookCategory } from "../lib/categoryTaxonomy";
-import { ShoppingBag, ArrowRight, Star, BookOpen } from "lucide-react";
+import { ShoppingBag, ArrowRight, Star } from "lucide-react";
 
 // Generic neutral placeholder image (Dark abstract minimal book cover)
 const NEUTRAL_PLACEHOLDER = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='500' viewBox='0 0 400 500'><rect width='400' height='500' fill='%2318181b'/><path d='M150 200h100v100H150z' fill='%2327272a'/><text x='200' y='250' font-family='sans-serif' font-size='14' fill='%2371717a' text-anchor='middle' dominant-baseline='middle'>No Cover Available</text></svg>";
@@ -46,7 +46,7 @@ export default function BookCard({ book }) {
   return (
     <div className="group relative bg-[#0F1117] hover:bg-[#131620] border border-zinc-800/90 hover:border-zinc-700/80 rounded-2xl overflow-hidden transition-all duration-300 flex flex-col h-full hover:shadow-2xl hover:shadow-sky-500/5">
       {/* Book Cover Container */}
-      <Link href={`/books/${bookId}`} className="relative block w-full pt-[125%] bg-zinc-900 overflow-hidden">
+      <Link href={`/book/${bookId}`} className="relative block w-full pt-[125%] bg-zinc-900 overflow-hidden">
         {imageSrc.startsWith("data:") ? (
           <img
             src={imageSrc}
@@ -90,7 +90,7 @@ export default function BookCard({ book }) {
             {bookCategory}
           </div>
 
-          <Link href={`/books/${bookId}`} className="block group-hover:text-sky-400 transition-colors">
+          <Link href={`/book/${bookId}`} className="block group-hover:text-sky-400 transition-colors">
             <h3 className="text-sm font-bold text-zinc-100 line-clamp-1 leading-snug">
               {book.title}
             </h3>
