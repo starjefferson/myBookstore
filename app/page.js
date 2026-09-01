@@ -168,8 +168,7 @@ function MarketplacePageContent() {
                 <div className="text-xs text-zinc-400 font-medium">Zone Shipping Rates</div>
               </div>
               <div>
-                <div className="text-xl sm:text-2xl font-bold font-mono text-sky-400">Updates</div>
-                <div className="text-xs text-zinc-400 font-medium">Vendor Dispatch by Email</div>
+                <div className="text-xs text-zinc-400 font-medium">Dispatched by Email</div>
               </div>
             </div>
           </div>
@@ -180,15 +179,6 @@ function MarketplacePageContent() {
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
         {/* Catalog controls */}
         <div className="flex flex-col gap-6 mb-8">
-          {/* Catalog status */}
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-            {/* Catalog sync status */}
-            <div className="flex items-center gap-2 text-xs text-zinc-400">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>Catalog synchronized twice weekly at 02:00 UTC</span>
-            </div>
-          </div>
-
           {/* Bottom Row: Category Pills & Sort */}
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pt-4 border-t border-zinc-800/60">
             {/* Categories */}
@@ -271,9 +261,6 @@ function MarketplacePageContent() {
 
         {!loading && filteredBooks.length > 0 && (
           <nav className="flex flex-col sm:flex-row items-center justify-between gap-4 mt-8 pt-5 border-t border-zinc-800/80" aria-label="Book catalog pagination">
-            <p className="text-xs text-zinc-500 font-mono">
-              Showing {(currentPage - 1) * BOOKS_PER_PAGE + 1}-{Math.min(currentPage * BOOKS_PER_PAGE, filteredBooks.length)} of {filteredBooks.length}
-            </p>
             <div className="flex items-center gap-2">
               <button
                 type="button"

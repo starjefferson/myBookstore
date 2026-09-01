@@ -1,6 +1,6 @@
 import React from "react";
 import Link from "next/link";
-import { BookOpen, ShieldCheck, Zap, Heart, Truck } from "lucide-react";
+import { BookOpen, ShieldCheck, Zap, Truck } from "lucide-react";
 
 export default function Footer() {
   return (
@@ -90,11 +90,7 @@ export default function Footer() {
 
         <div className="pt-8 border-t border-zinc-800/60 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-zinc-400">
           <div>
-            &copy; {new Date().getFullYear()} Digital Concierge Bookstore. Built with Next.js, Firebase & Paystack.
-          </div>
-          <div className="flex items-center gap-1 text-zinc-400">
-            <span>Powered by Grok Aesthetic Design</span>
-            <Heart className="w-3 h-3 text-rose-500 fill-rose-500 inline ml-1" />
+            &copy; {new Date().getFullYear()} Digital Concierge Bookstore. All rights reserved.
           </div>
         </div>
       </div>
