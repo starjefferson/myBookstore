@@ -26,6 +26,16 @@ function getSafeImageUrl(book) {
   if (formatted.startsWith("data:") || formatted.startsWith("/api/image-proxy")) return formatted;
   return `/api/image-proxy?url=${encodeURIComponent(formatted)}`;
 }
+
+// Returns Open Library cover URL via our proxy as a fallback for broken vendor images
+function getOpenLibraryCover(book) {
+  const isbn = book.isbn || book.isbn13 || book.isbn10;
+  if (!isbn) return null;
+  const clean = String(isbn).replace(/[^0-9X]/gi, "");
+  if (!clean) return null;
+  return `/api/image-proxy?url=${encodeURIComponent(`https://covers.openlibrary.org/b/isbn/${clean}-L.jpg`)}`;
+}
+
 import {
   ArrowLeft,
   ShoppingBag,
@@ -52,6 +62,9 @@ export default function BookDetailPage() {
   const [loading, setLoading] = useState(true);
   const [quantity, setQuantity] = useState(1);
   const [selectedZonePreview, setSelectedZonePreview] = useState("Lagos");
+  // Cover image with 3-stage fallback: vendor proxy → Open Library → placeholder
+  const [coverSrc, setCoverSrc] = useState(NEUTRAL_PLACEHOLDER);
+  const [coverFallbackStage, setCoverFallbackStage] = useState(0);
 
   useEffect(() => {
     const loadData = async () => {
@@ -59,6 +72,9 @@ export default function BookDetailPage() {
       try {
         const data = await fetchBookById(params.id);
         setBook(data);
+        // Initialise cover with vendor URL via proxy; fallback chain handles errors
+        setCoverSrc(getSafeImageUrl(data));
+        setCoverFallbackStage(0);
 
         const all = await fetchBooks();
 
@@ -223,9 +239,20 @@ export default function BookDetailPage() {
           <div className="md:col-span-5 flex flex-col items-center">
             <div className="relative w-full max-w-sm rounded-2xl overflow-hidden shadow-2xl border border-zinc-800 bg-zinc-900 group">
               <img
-                src={getSafeImageUrl(book)}
+                src={coverSrc}
                 alt={book.title}
-                onError={(e) => { e.currentTarget.src = NEUTRAL_PLACEHOLDER; }}
+                onError={() => {
+                  if (coverFallbackStage === 0) {
+                    const olCover = getOpenLibraryCover(book);
+                    if (olCover) {
+                      setCoverFallbackStage(1);
+                      setCoverSrc(olCover);
+                      return;
+                    }
+                  }
+                  setCoverFallbackStage(2);
+                  setCoverSrc(NEUTRAL_PLACEHOLDER);
+                }}
                 className="w-full h-auto object-cover group-hover:scale-102 transition-transform duration-500"
               />
 

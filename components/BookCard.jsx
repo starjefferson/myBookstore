@@ -45,11 +45,23 @@ function getSafeImageUrl(book) {
   return `/api/image-proxy?url=${encodeURIComponent(formatted)}`;
 }
 
+// Returns the Open Library cover URL proxied through our image proxy (bypasses any CORS/hotlink issues)
+function getOpenLibraryCover(book) {
+  const isbn = book.isbn || book.isbn13 || book.isbn10;
+  if (!isbn) return null;
+  const clean = String(isbn).replace(/[^0-9X]/gi, "");
+  if (!clean) return null;
+  return `/api/image-proxy?url=${encodeURIComponent(`https://covers.openlibrary.org/b/isbn/${clean}-L.jpg`)}`;
+}
+
 export default function BookCard({ book }) {
   const router = useRouter();
   const { addToCart } = useCart();
   const { showToast } = useToast();
-  const [imgError, setImgError] = useState(false);
+
+  // 3-stage fallback: 0 = vendor proxy, 1 = Open Library, 2 = placeholder
+  const [fallbackStage, setFallbackStage] = useState(0);
+  const [imgSrc, setImgSrc] = useState(() => getSafeImageUrl(book));
 
   if (!book) return null;
 
@@ -60,9 +72,23 @@ export default function BookCard({ book }) {
     bookCategory = "General";
   }
 
-  const imageSrc = imgError ? NEUTRAL_PLACEHOLDER : getSafeImageUrl(book);
   const price = book.retailPrice || book.price || 0;
   const bookId = book.id || book._id;
+
+  const handleImgError = () => {
+    if (fallbackStage === 0) {
+      // Stage 1: try Open Library cover by ISBN
+      const olCover = getOpenLibraryCover(book);
+      if (olCover) {
+        setFallbackStage(1);
+        setImgSrc(olCover);
+        return;
+      }
+    }
+    // Stage 2 (or no ISBN): show placeholder
+    setFallbackStage(2);
+    setImgSrc(NEUTRAL_PLACEHOLDER);
+  };
 
   const handleQuickBuy = (e) => {
     e.preventDefault();
@@ -83,10 +109,10 @@ export default function BookCard({ book }) {
       {/* Book Cover Container */}
       <Link href={`/book/${bookId}`} className="relative block w-full pt-[125%] bg-zinc-900 overflow-hidden">
         <img
-          src={imageSrc}
+          src={imgSrc}
           alt={book.title || "Book Cover"}
           loading="lazy"
-          onError={() => setImgError(true)}
+          onError={handleImgError}
           className="absolute inset-0 w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-500"
         />
 
