@@ -146,7 +146,7 @@ function MarketplacePageContent() {
             </h1>
 
             <p className="text-base sm:text-lg text-zinc-400 mb-8 leading-relaxed">
-              Discover pristine physical copies of award-winning fiction, memoirs, African history, and business bestsellers. Delivery costs are shown clearly at checkout, with vendor dispatch updates when available.
+              Discover pristine physical copies of award-winning fiction, memoirs, African history, and business bestsellers. Delivery costs are shown clearly at checkout, with tracking updates when available.
             </p>
 
             {/* Value Props Bar */}
@@ -231,7 +231,7 @@ function MarketplacePageContent() {
             <Layers className="w-12 h-12 text-zinc-600 mx-auto mb-3" />
             <h3 className="text-base font-semibold text-zinc-200 mb-1">No books matched your criteria</h3>
             <p className="text-xs text-zinc-500 max-w-sm mx-auto mb-6">
-              Try adjusting your search query or switching the vendor filter to explore more titles.
+              Try adjusting your search query or category filter to explore more titles.
             </p>
             <button
               onClick={() => {

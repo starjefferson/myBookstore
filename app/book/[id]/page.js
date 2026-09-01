@@ -195,33 +195,9 @@ export default function BookDetailPage() {
                 className="w-full h-auto object-cover group-hover:scale-102 transition-transform duration-500"
               />
 
-              {/* Vendor Badge Floating */}
-              <div className="absolute top-4 left-4">
-                <span
-                  className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold shadow-lg backdrop-blur-md ${
-                    isMasobe
-                      ? "bg-emerald-950/90 text-emerald-300 border border-emerald-500/50"
-                      : "bg-sky-950/90 text-sky-300 border border-sky-500/50"
-                  }`}
-                >
-                  <span className={`w-2 h-2 rounded-full ${isMasobe ? "bg-emerald-400" : "bg-sky-400"}`} />
-                  Direct via {isMasobe ? "Masobe Books" : "Rovingheights"}
-                </span>
-              </div>
+
             </div>
 
-            {/* Vendor Direct Proof Link */}
-            {book.sourceUrl && (
-              <a
-                href={book.sourceUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-4 inline-flex items-center gap-1.5 text-xs text-zinc-500 hover:text-sky-400 transition-colors font-mono"
-              >
-                <span>Verify on {book.sourceVendor === "masobe" ? "MasobeBooks.com" : "RHBooks.com.ng"}</span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
-            )}
           </div>
 
           {/* Right Metadata & Purchase Column */}

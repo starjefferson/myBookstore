@@ -9,7 +9,7 @@ import CartDrawer from "../components/CartDrawer";
 
 export const metadata = {
   title: "Concierge Books | Digital Dropshipping Bookstore Marketplace",
-  description: "Curated Nigerian and African literature dropshipped directly from Masobe Books and Rovingheights.",
+  description: "Discover pristine physical copies of award-winning African and international literature, delivered nationwide.",
   icons: {
     icon: "/icon.svg",
   },
