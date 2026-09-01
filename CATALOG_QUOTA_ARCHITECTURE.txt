@@ -11,8 +11,8 @@ predictable as the number of users grows.
 
 The design goal is:
 
-  - scrape and write a new catalog on the scheduled scrape cycle;
-  - let browsers reuse a local catalog for three days;
+  - scrape and delta-sync new/changed catalog data once weekly (Monday 2 AM UTC);
+  - let browsers reuse a local catalog for seven days;
   - share a server-side catalog cache between requests where possible; and
   - ensure that users call the website API, never Firestore, for the public
     catalog.
@@ -24,18 +24,18 @@ CATALOG DATA FLOW
   Vendor websites
         |
         v
-  scripts/scrape.js
+  scripts/scrape.js (Monday 2 AM UTC, resumes from checkpoint)
         |
         +--> scraped_catalog.json
         |
         v
-  scripts/seed.js (or the configured scrape/seed job)
+  scripts/seed.js (delta sync: only new/changed books)
         |
-        +--> Firestore: books collection
+        +--> Firestore: books collection (only writes changed/new)
         +--> Firestore: catalogMeta/current
         |              { version, updatedAt, bookCount }
         v
-  /api/catalog and /api/catalog-version
+  /api/catalog and /api/catalog-version (cached 7 days)
         |
         v
   Browser IndexedDB: concierge_catalog_cache / catalog / current
@@ -44,25 +44,29 @@ CATALOG DATA FLOW
   Marketplace screen
 
 
-1. SCHEDULED SCRAPE AND FIRESTORE WRITES
-----------------------------------------
+1. SCHEDULED SCRAPE AND FIRESTORE WRITES (DELTA SYNC)
+-----------------------------------------------------
 
-The scheduled job collects books from the vendor sites. The seeder writes the
-result to the Firestore books collection in batches and then writes
-catalogMeta/current.
+The scheduled job runs once per week (Monday 2 AM UTC) and collects books from
+the vendor sites. The scraper maintains checkpoints to resume from where it
+left off if interrupted.
 
-catalogMeta/current is a small marker that tells the application which catalog
-snapshot is current. Its version is changed only after the book records have
-been written successfully.
+After scraping completes, the seeder performs delta sync:
+  1. Reads existing book IDs and key fields from Firestore
+  2. Compares scraped books against existing books
+  3. Identifies NEW books (not in Firestore) and CHANGED books (different
+     price, description, stock status, or rating)
+  4. Writes ONLY new and changed books to Firestore in batches
+  5. Updates catalogMeta/current version after all writes succeed
 
-This means Firestore is changed by the scheduled backend workflow, not by
-catalog visitors. A visitor does not write the books collection or the catalog
-metadata document.
+This minimizes Firestore write costs by skipping unchanged books:
+  - First scrape: All 4,556 books written (full initial load)
+  - Subsequent scrapes: Typically 50-200 book writes (only changes)
+  - Result: ~100 writes/month instead of 18,000+ writes/month
 
-The actual write frequency is the frequency of the scraper/seed job. If that
-job is scheduled every three days, Firestore catalog writes happen once each
-three-day cycle. If it runs twice weekly, the interval is approximately three
-to four days rather than exactly three days.
+Note: Delta sync only affects Firestore writes, not scraper checkpoints.
+The scraper checkpoints allow resuming from the last vendor page if the
+scrape is interrupted, and they remain unaffected by seeding logic.
 
 
 2. A FIRST-TIME OR EXPIRED BROWSER VISIT
@@ -73,16 +77,17 @@ The browser calls fetchBooks() in lib/dataService.js.
 1. It reads IndexedDB database "concierge_catalog_cache", object store
    "catalog", key "current".
 2. If no catalog exists, or its checkedAt timestamp is older than
-   CATALOG_CHECK_INTERVAL (currently three days), it calls:
+   CATALOG_CHECK_INTERVAL (currently seven days), it calls:
 
        GET /api/catalog-version
 
-3. The version route reads only catalogMeta/current when its server cache is
-   empty. This is one small Firestore document read, not a read of every book.
+3. The version route reads only catalogMeta/current from Firestore when its
+   server cache is empty. This is one small Firestore document read, not a
+   read of every book.
 4. The browser requests GET /api/catalog?version=<catalog-version>.
-5. The catalog route gets the books from its server cache when available. On a
-   server-cache miss it reads the books collection from Firestore once, returns
-   the JSON catalog, and holds that snapshot in its server cache for three days.
+5. The catalog route returns cached books if available. On a server-cache miss,
+   it reads the books collection from Firestore once, returns the JSON catalog,
+   and holds that snapshot in server memory for seven days.
 6. The browser stores { books, version, checkedAt } in IndexedDB and displays
    the result.
 
@@ -90,11 +95,11 @@ No public-browser Firestore SDK catalog query is made in this path. Firebase
 Admin is used only inside the server routes.
 
 
-3. A NORMAL RETURN VISIT WITHIN THREE DAYS
-------------------------------------------
+3. A NORMAL RETURN VISIT WITHIN SEVEN DAYS
+-------------------------------------------
 
 1. fetchBooks() reads the browser's IndexedDB catalog.
-2. checkedAt is still within the three-day interval.
+2. checkedAt is still within the seven-day interval.
 3. The cached books are returned.
 4. No call is made to /api/catalog-version or /api/catalog.
 5. Therefore, this user visit consumes no Firestore read for the catalog.
@@ -103,21 +108,21 @@ This per-browser cache is particularly valuable because thousands of repeat
 visitors can render the full book list without each downloading it again.
 
 
-4. WHAT HAPPENS AFTER A NEW SCRAPE
-----------------------------------
+4. WHAT HAPPENS AFTER A WEEKLY SCRAPE
+--------------------------------------
 
-The new data is in Firestore immediately after the scheduled seed completes.
-Browsers do not need to be notified in real time because the product accepts a
-three-day freshness window.
+The new/changed data is in Firestore immediately after the scheduled delta sync
+completes (Monday 2 AM UTC). Browsers do not need to be notified in real time
+because the product accepts a seven-day freshness window.
 
-When a browser's local three-day interval expires, it checks the version route.
+When a browser's local seven-day interval expires, it checks the version route.
 If the version differs from its IndexedDB version, it fetches the catalog and
 replaces its local snapshot. If the version is unchanged, it retains its books
 and refreshes checkedAt.
 
-Users can consequently see a catalog that is up to the chosen cache interval
-behind the most recently scraped data. This is the deliberate trade-off for
-minimal Firestore usage.
+Users consequently see a catalog that is up to seven days behind the most
+recently scraped data. This is the deliberate trade-off for minimal Firestore
+usage and predictable costs.
 
 
 5. IMPORTANT LIMITATION OF THE CURRENT SERVER CACHE
@@ -184,17 +189,23 @@ Further useful improvements:
 QUOTA SUMMARY
 -------------
 
-Repeat visit within 3 days:
+Repeat visit within 7 days:
   Browser IndexedDB read only; zero API and Firestore catalog reads.
 
-New browser / browser cache older than 3 days:
+New browser / browser cache older than 7 days:
   API requests are made. The server cache should serve the full catalog; only
   a shared-cache miss should cause the server to read Firestore.
 
-Scheduled catalog update:
-  The backend writes the changed/new book documents and one metadata document.
-  These are the intentional catalog Firestore writes.
+Scheduled catalog update (Monday 2 AM UTC):
+  Delta sync: Typically 50-200 book writes per week (only new/changed books).
+  One catalogMeta write per week.
+  Total: ~5-10 Firestore writes per week instead of 4,556+.
+
+Monthly Firestore quota impact (estimated):
+  Reads:  ~4-8 per month (version checks + cache misses)
+  Writes: ~20-40 per month (delta sync + metadata)
+  Cost:   $0.00/month (stays within free tier of 25K reads + 25K writes)
 
 The architecture reduces Firestore traffic from "one full catalog query per
-visitor" to "one shared catalog refresh per cache window, plus scheduled data
-writes" once the shared cache is made durable across server instances.
+visitor" to "delta sync once weekly, plus browser caching for seven days",
+staying well within the free tier for indefinite scale.

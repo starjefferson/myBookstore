@@ -3,7 +3,7 @@
  * Syncs catalog data from Masobe Books, Rovingheights, and Retala into Firestore & JSON
  * Scrapes by category with pagination: up to 50 pages per category
  * Run via cron / CLI: node scripts/scrape.js
- * Cron schedule: 2x per week (e.g., Mon/Thu 2 AM)
+ * Cron schedule: Once per week, Monday 2:00 AM UTC
  */
 const { chromium } = require("playwright");
 const fs = require("fs");

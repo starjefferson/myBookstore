@@ -59,22 +59,68 @@ async function seed() {
       console.log(`✓ Wrote ${SHIPPING_ZONES.length} shipping zones to Firestore.`);
     }
 
-    // 2. Seed scraped books only
-    if (allBooks.length > 0) {
-      for (let start = 0; start < allBooks.length; start += 400) {
-        const bookBatch = db.batch();
-        allBooks.slice(start, start + 400).forEach((book) => {
-          const docRef = db.collection("books").doc(book.id);
-          bookBatch.set(docRef, book, { merge: true });
+    // 2. Delta sync: only write new or changed books to Firestore
+    if (scrapedBooks.length > 0) {
+      // Get existing book IDs and key fields for comparison
+      const existingSnapshot = await db.collection("books").get();
+      const existingBooks = new Map();
+      existingSnapshot.docs.forEach((doc) => {
+        const data = doc.data();
+        existingBooks.set(doc.id, {
+          vendorPrice: data.vendorPrice,
+          retailPrice: data.retailPrice,
+          description: data.description,
+          inStock: data.inStock,
+          rating: data.rating,
+          updatedAt: data.updatedAt
         });
-        await bookBatch.commit();
+      });
+
+      // Identify new and changed books
+      const newBooks = [];
+      const changedBooks = [];
+
+      scrapedBooks.forEach((book) => {
+        if (!existingBooks.has(book.id)) {
+          newBooks.push(book);
+        } else {
+          const existing = existingBooks.get(book.id);
+          const hasChanges =
+            existing.vendorPrice !== book.vendorPrice ||
+            existing.retailPrice !== book.retailPrice ||
+            existing.description !== book.description ||
+            existing.inStock !== book.inStock ||
+            existing.rating !== book.rating;
+          if (hasChanges) {
+            changedBooks.push(book);
+          }
+        }
+      });
+
+      // Write new and changed books in batches
+      const booksToWrite = [...newBooks, ...changedBooks];
+      if (booksToWrite.length > 0) {
+        for (let start = 0; start < booksToWrite.length; start += 400) {
+          const bookBatch = db.batch();
+          booksToWrite.slice(start, start + 400).forEach((book) => {
+            const docRef = db.collection("books").doc(book.id);
+            bookBatch.set(docRef, book, { merge: true });
+          });
+          await bookBatch.commit();
+        }
+        console.log(
+          `✓ Delta sync: ${newBooks.length} new books, ${changedBooks.length} changed books written to Firestore.`
+        );
+      } else {
+        console.log(`✓ Delta sync: No new or changed books. Firestore catalog is current.`);
       }
+
+      // Update catalogMeta version after all book writes complete
       await db.collection("catalogMeta").doc("current").set({
         version: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        bookCount: allBooks.length
+        bookCount: scrapedBooks.length
       });
-      console.log(`✓ Wrote ${allBooks.length} total books to Firestore.`);
     }
 
     // 3. Seed Sample Orders

@@ -28,7 +28,8 @@ let catalogCacheVersion = null;
 
 export const dynamic = "force-dynamic";
 
-const CATALOG_CACHE_TTL = 3 * 24 * 60 * 60 * 1000;
+// Cache for 7 days to align with once-weekly scrape (Monday 2 AM UTC)
+const CATALOG_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
 
 export async function GET(request) {
   try {
@@ -49,7 +50,7 @@ export async function GET(request) {
     const cacheIsFresh = catalogCache && Date.now() - catalogCache.createdAt < CATALOG_CACHE_TTL;
     if (cacheIsFresh && catalogCacheVersion === version) {
       return NextResponse.json(catalogCache.books, {
-        headers: { "Cache-Control": "no-store" }
+        headers: { "Cache-Control": "public, s-maxage=604800, stale-while-revalidate=86400" }
       });
     }
 
@@ -59,7 +60,7 @@ export async function GET(request) {
     catalogCacheVersion = version;
     return NextResponse.json(books, {
       headers: {
-        "Cache-Control": "no-store"
+        "Cache-Control": "public, s-maxage=604800, stale-while-revalidate=86400"
       }
     });
   } catch (error) {
