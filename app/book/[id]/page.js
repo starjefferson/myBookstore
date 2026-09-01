@@ -61,7 +61,23 @@ export default function BookDetailPage() {
         setBook(data);
 
         const all = await fetchBooks();
-        setRelatedBooks(all.filter((b) => b.id !== params.id).slice(0, 4));
+
+        // Pick related books: same category first (shuffled), then fill with others
+        const currentCategory = classifyBookCategory(data);
+        const others = all.filter((b) => b.id !== params.id);
+
+        const shuffle = (arr) => arr.slice().sort(() => Math.random() - 0.5);
+
+        const sameCategory = shuffle(
+          others.filter((b) => classifyBookCategory(b) === currentCategory)
+        );
+        const different = shuffle(
+          others.filter((b) => classifyBookCategory(b) !== currentCategory)
+        );
+
+        // Fill up to 4: same-category books first, then pad with others
+        const related = [...sameCategory, ...different].slice(0, 4);
+        setRelatedBooks(related);
       } catch (err) {
         console.error("Error loading book detail", err);
       } finally {
