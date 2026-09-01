@@ -9,6 +9,23 @@ import { useToast } from "../../../components/Toast";
 import { formatNGN, SHIPPING_ZONES } from "../../../lib/zones";
 import { classifyBookCategory } from "../../../lib/categoryTaxonomy";
 import BookCard from "../../../components/BookCard";
+
+const NEUTRAL_PLACEHOLDER =
+  "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='500' viewBox='0 0 400 500'><rect width='400' height='500' fill='%2318181b'/><path d='M150 200h100v100H150z' fill='%2327272a'/><text x='200' y='250' font-family='sans-serif' font-size='14' fill='%2371717a' text-anchor='middle' dominant-baseline='middle'>No Cover Available</text></svg>";
+
+// Routes vendor image URLs through the server-side proxy to bypass hotlink protection
+function getSafeImageUrl(book) {
+  if (!book) return NEUTRAL_PLACEHOLDER;
+  const raw =
+    book.coverImage || book.cover_image || book.image ||
+    book.coverUrl || book.cover_url || book.cover ||
+    book.imageUrl || book.thumbnail;
+  if (!raw || typeof raw !== "string") return NEUTRAL_PLACEHOLDER;
+  let formatted = raw.trim();
+  if (formatted.startsWith("//")) formatted = `https:${formatted}`;
+  if (formatted.startsWith("data:") || formatted.startsWith("/api/image-proxy")) return formatted;
+  return `/api/image-proxy?url=${encodeURIComponent(formatted)}`;
+}
 import {
   ArrowLeft,
   ShoppingBag,
@@ -190,8 +207,9 @@ export default function BookDetailPage() {
           <div className="md:col-span-5 flex flex-col items-center">
             <div className="relative w-full max-w-sm rounded-2xl overflow-hidden shadow-2xl border border-zinc-800 bg-zinc-900 group">
               <img
-                src={book.coverImage}
+                src={getSafeImageUrl(book)}
                 alt={book.title}
+                onError={(e) => { e.currentTarget.src = NEUTRAL_PLACEHOLDER; }}
                 className="w-full h-auto object-cover group-hover:scale-102 transition-transform duration-500"
               />
 
