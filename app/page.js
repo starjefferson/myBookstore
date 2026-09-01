@@ -138,14 +138,6 @@ function MarketplacePageContent() {
 
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
           <div className="max-w-3xl">
-            {/* Header Badge */}
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900/90 border border-zinc-800 text-xs font-mono text-zinc-300 mb-6 shadow-inner">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-zinc-400">Curated Bookstore Collection</span>
-              <span className="text-zinc-600">&bull;</span>
-              <span className="text-sky-400 font-semibold">100% Guaranteed Genuine</span>
-            </div>
-
             <h1 className="text-4xl sm:text-6xl font-extrabold text-zinc-100 tracking-tight leading-[1.1] mb-6">
               Authentic African & International Literature,{" "}
               <span className="text-transparent bg-clip-text bg-gradient-to-r from-sky-400 to-blue-500">
