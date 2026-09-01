@@ -9,14 +9,13 @@ import { formatNGN } from "../lib/zones";
 import { classifyBookCategory } from "../lib/categoryTaxonomy";
 import { ShoppingBag, ArrowRight, Star } from "lucide-react";
 
-const NEUTRAL_PLACEHOLDER =
-  "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='500' viewBox='0 0 400 500'><rect width='400' height='500' fill='%2318181b'/><path d='M150 200h100v100H150z' fill='%2327272a'/><text x='200' y='250' font-family='sans-serif' font-size='14' fill='%2371717a' text-anchor='middle' dominant-baseline='middle'>No Cover Available</text></svg>";
+import { generateBookCoverDataUrl } from "../lib/coverGenerator";
 
 // Fail-safe helper to parse vendor image URLs without throwing URIErrors.
 // On production all vendor images are proxied through /api/image-proxy to
 // bypass hotlink protection (rhbooks.com.ng, masobe, etc. block external Referers).
 function getSafeImageUrl(book) {
-  if (!book) return NEUTRAL_PLACEHOLDER;
+  if (!book) return "";
 
   const raw =
     book.coverImage ||
@@ -28,7 +27,18 @@ function getSafeImageUrl(book) {
     book.imageUrl ||
     book.thumbnail;
 
-  if (!raw || typeof raw !== "string") return NEUTRAL_PLACEHOLDER;
+  let category = "General";
+  try {
+    category = classifyBookCategory(book) || "General";
+  } catch (e) {}
+
+  if (!raw || typeof raw !== "string" || !raw.trim()) {
+    return generateBookCoverDataUrl({
+      title: book.title,
+      author: book.author,
+      category: category,
+    });
+  }
 
   let formatted = raw.trim();
   if (formatted.startsWith("//")) {
@@ -40,18 +50,14 @@ function getSafeImageUrl(book) {
     return formatted;
   }
 
-  // Route through server-side proxy — strips Referer header so vendor
-  // hotlink protection doesn't block the image on Vercel.
-  return `/api/image-proxy?url=${encodeURIComponent(formatted)}`;
-}
+  const query = new URLSearchParams({
+    url: formatted,
+    title: book.title || "",
+    author: book.author || "",
+    category: category,
+  });
 
-// Returns the Open Library cover URL proxied through our image proxy (bypasses any CORS/hotlink issues)
-function getOpenLibraryCover(book) {
-  const isbn = book.isbn || book.isbn13 || book.isbn10;
-  if (!isbn) return null;
-  const clean = String(isbn).replace(/[^0-9X]/gi, "");
-  if (!clean) return null;
-  return `/api/image-proxy?url=${encodeURIComponent(`https://covers.openlibrary.org/b/isbn/${clean}-L.jpg`)}`;
+  return `/api/image-proxy?${query.toString()}`;
 }
 
 export default function BookCard({ book }) {
@@ -59,8 +65,6 @@ export default function BookCard({ book }) {
   const { addToCart } = useCart();
   const { showToast } = useToast();
 
-  // 3-stage fallback: 0 = vendor proxy, 1 = Open Library, 2 = placeholder
-  const [fallbackStage, setFallbackStage] = useState(0);
   const [imgSrc, setImgSrc] = useState(() => getSafeImageUrl(book));
 
   if (!book) return null;
@@ -76,18 +80,14 @@ export default function BookCard({ book }) {
   const bookId = book.id || book._id;
 
   const handleImgError = () => {
-    if (fallbackStage === 0) {
-      // Stage 1: try Open Library cover by ISBN
-      const olCover = getOpenLibraryCover(book);
-      if (olCover) {
-        setFallbackStage(1);
-        setImgSrc(olCover);
-        return;
-      }
-    }
-    // Stage 2 (or no ISBN): show placeholder
-    setFallbackStage(2);
-    setImgSrc(NEUTRAL_PLACEHOLDER);
+    // Generate beautiful custom cover SVG for this exact book
+    setImgSrc(
+      generateBookCoverDataUrl({
+        title: book.title,
+        author: book.author,
+        category: bookCategory,
+      })
+    );
   };
 
   const handleQuickBuy = (e) => {
