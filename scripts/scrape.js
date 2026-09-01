@@ -116,6 +116,18 @@ const cleanAuthor = (value) => {
   return author;
 };
 
+const generateDescription = (item) => {
+  if (item.description && item.description.trim() && item.description.length > 20) {
+    return item.description
+      .replace(/sourced\s+(?:through|from|via)\s+(?:Rovingheights|Retala|Masoba|Masobe)/gi, "sourced")
+      .replace(/published\s+by\s+(?:Rovingheights|Retala|Masoba|Masobe)/gi, "published")
+      .replace(/available\s+at\s+(?:Rovingheights|Retala|Masoba|Masobe)/gi, "available")
+      .trim()
+      .substring(0, 500);
+  }
+  return `Authentic physical edition of "${item.title}" by ${item.authorText || "Unknown Author"}.`;
+};
+
 async function addAuthorDetails(page, items, options = {}) {
   if (!SCRAPE_AUTHORS) return items;
   const lookupTimeout = options.timeout || 15000;
@@ -236,6 +248,7 @@ async function scrapeMasoba(page) {
           const imgEl = el.querySelector("img");
           const linkEl = el.querySelector(".woocommerce-loop-product__title a, h2 a, h3 a, a[href*='/product/'], a[href]");
           const categoryEl = el.querySelector(".product-category, .cat-links, .category");
+          const descEl = el.querySelector(".woocommerce-product-details__short-description, .product-description, .short-description, p");
 
           return {
             title: titleEl ? titleEl.innerText.trim() : "",
@@ -244,7 +257,8 @@ async function scrapeMasoba(page) {
             stockText: el.innerText.trim(),
             coverImage: imgEl ? (imgEl.getAttribute("data-src") || imgEl.getAttribute("data-lazy-src") || imgEl.getAttribute("data-original") || imgEl.getAttribute("srcset")?.split(",")[0]?.trim().split(" ")[0] || imgEl.getAttribute("src") || "") : "",
             sourceUrl: linkEl ? linkEl.href : "",
-            category: categoryEl ? categoryEl.innerText.trim() : "African Literature"
+            category: categoryEl ? categoryEl.innerText.trim() : "African Literature",
+            description: descEl ? descEl.innerText.trim() : ""
           };
         });
       });
@@ -264,7 +278,7 @@ async function scrapeMasoba(page) {
           id: `masobe-${pageNum}-${slug}`,
           title: item.title,
           author: cleanAuthor(item.authorText) || "Unknown Author",
-          description: `Authentic physical edition of "${item.title}" published by Masoba Books.`,
+          description: generateDescription(item),
           coverImage: item.coverImage || "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=800",
           vendorPrice: vendorPrice,
           retailPrice: retailPrice,
@@ -364,7 +378,7 @@ async function scrapeRovingheights(page, options = {}) {
           id: `roving-${pageNum}-${slug}`,
           title: item.title,
           author: cleanAuthor(item.authorText) || "Unknown Author",
-          description: `Genuine physical copy of "${item.title}" sourced through Rovingheights.`,
+          description: generateDescription(item),
           coverImage: item.coverImage || "https://images.unsplash.com/photo-1512820790803-83ca734da794?auto=format&fit=crop&q=80&w=800",
           vendorPrice: vendorPrice,
           retailPrice: retailPrice,
@@ -473,7 +487,7 @@ async function scrapeSingleRetalaPage(page, books, baseUrl, categoryName, option
           id: `retala-${pageNum}-${slug}`,
           title: item.title,
           author: cleanAuthor(item.authorText) || "Unknown Author",
-          description: `Authentic literary edition of "${item.title}" sourced via Retala.`,
+          description: generateDescription(item),
           coverImage: item.coverImage || "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&q=80&w=800",
           vendorPrice: vendorPrice,
           retailPrice: retailPrice,

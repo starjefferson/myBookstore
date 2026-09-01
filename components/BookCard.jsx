@@ -2,21 +2,21 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useCart } from "../contexts/CartContext";
 import { useToast } from "./Toast";
 import { formatNGN } from "../lib/zones";
 import { classifyBookCategory } from "../lib/categoryTaxonomy";
-import { ShoppingBag, ArrowRight, Star, ExternalLink, Zap } from "lucide-react";
+import { ShoppingBag, ArrowRight, Star } from "lucide-react";
+
+const FALLBACK_IMAGE = "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=600";
 
 export default function BookCard({ book }) {
   const router = useRouter();
   const { addToCart } = useCart();
   const { showToast } = useToast();
-  const [imgLoaded, setImgLoaded] = useState(false);
   const [imgError, setImgError] = useState(false);
-
-  const isMasobe = book.sourceVendor === "masobe";
   const bookCategory = classifyBookCategory(book);
 
   const handleQuickBuy = (e) => {
@@ -33,32 +33,21 @@ export default function BookCard({ book }) {
     showToast(`Added "${book.title}" to your bag`, "success");
   };
 
-  const fallbackImage = "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=600";
-
   return (
     <div className="group relative bg-[#0F1117] hover:bg-[#131620] border border-zinc-800/90 hover:border-zinc-700/80 rounded-2xl overflow-hidden transition-all duration-300 flex flex-col h-full hover:shadow-2xl hover:shadow-sky-500/5">
       {/* Book Cover Container */}
       <Link href={`/book/${book.id}`} className="relative block w-full pt-[125%] bg-zinc-900 overflow-hidden">
-        {/* Placeholder skeleton before load */}
-        {!imgLoaded && !imgError && (
-          <div className="absolute inset-0 bg-zinc-800/40 animate-pulse flex items-center justify-center text-zinc-600 text-xs">
-            Loading cover...
-          </div>
-        )}
-
-        <img
-          src={imgError ? fallbackImage : book.coverImage || fallbackImage}
+        <Image
+          src={imgError ? FALLBACK_IMAGE : book.coverImage || FALLBACK_IMAGE}
           alt={book.title}
-          loading="lazy"
-          decoding="async"
-          onLoad={() => setImgLoaded(true)}
+          fill
+          priority={false}
+          sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw"
           onError={() => setImgError(true)}
-          className={`absolute inset-0 w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-500 ${
-            imgLoaded ? "opacity-100" : "opacity-0"
-          }`}
+          className="object-cover object-center group-hover:scale-105 transition-transform duration-500"
         />
 
-        {/* Category Pill Badge */}
+        {/* Category Badge */}
         <div className="absolute top-3 left-3 z-10">
           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-semibold tracking-wide shadow-md backdrop-blur-md bg-zinc-950/80 text-zinc-300 border border-zinc-700/60 uppercase">
             <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
