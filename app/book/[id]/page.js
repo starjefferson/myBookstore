@@ -35,6 +35,7 @@ function getSafeImageUrl(book) {
 
   let formatted = raw.trim();
   if (formatted.startsWith("//")) formatted = `https:${formatted}`;
+  if (formatted.includes("res.cloudinary.com")) return formatted;
   if (formatted.startsWith("data:") || formatted.startsWith("/api/image-proxy")) return formatted;
 
   const query = new URLSearchParams({

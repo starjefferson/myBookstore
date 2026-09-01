@@ -45,6 +45,11 @@ function getSafeImageUrl(book) {
     formatted = `https:${formatted}`;
   }
 
+  // If image is already hosted on Cloudinary CDN, load directly (blazing fast, no proxy needed)
+  if (formatted.includes("res.cloudinary.com")) {
+    return formatted;
+  }
+
   // Skip proxying data URIs and already-proxied paths
   if (formatted.startsWith("data:") || formatted.startsWith("/api/image-proxy")) {
     return formatted;

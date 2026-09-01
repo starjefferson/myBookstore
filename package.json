@@ -9,9 +9,11 @@
     "lint": "next lint",
     "seed": "node scripts/seed.js",
     "scrape": "node scripts/scrape.js",
+    "sync:images": "node scripts/sync-images-to-cloudinary.js",
     "cleanup:invalid-books": "node scripts/cleanup-invalid-books.js"
   },
   "dependencies": {
+    "cloudinary": "^2.11.0",
     "clsx": "^2.1.1",
     "firebase": "^10.14.1",
     "firebase-admin": "^14.3.0",
