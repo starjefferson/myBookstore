@@ -2,12 +2,14 @@
  * Standalone REST API Catalog Ingestion Engine
  * Syncs catalog data from Masobe Books, Rovingheights, and Retala into Firestore & JSON
  * Batch Size: 24 items per page via WooCommerce REST APIs
+ * Uses Playwright as an API client for Rovingheights to bypass Cloudflare WAF without DOM scraping
  * Run via cron / CLI: node scripts/scrape.js
  * Cron schedule: Twice per week (Mon/Thu 2:00 AM UTC)
  */
 
 const fs = require("fs");
 const path = require("path");
+const { chromium } = require("playwright");
 const { initializeApp, cert, getApps } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
 const { loadEnvConfig } = require("@next/env");
@@ -140,10 +142,96 @@ const generateDescription = (item) => {
 };
 
 /**
- * Fetches vendor catalog via WooCommerce REST API in batches of 24
- * Routes Rovingheights through a proxy wrapper to bypass Cloudflare/Wordfence WAF blocks (Option 1)
+ * Fetches Rovingheights REST API via Playwright browser context.
+ * Bypasses Cloudflare WAF without scraping HTML DOM elements.
  */
-async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_PER_VENDOR) {
+async function fetchRovingheightsViaBrowserApi(browser, maxPages = MAX_PAGES_PER_VENDOR) {
+  console.log(`--> [Browser API Client] Fetching REST API catalog from rovingheights (https://rhbooks.com.ng) at ${ITEMS_PER_PAGE} items/page...`);
+  const books = [];
+
+  const context = await browser.newContext({
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  });
+  const page = await context.newPage();
+
+  try {
+    // 1. Visit homepage to obtain Cloudflare clearance session
+    await page.goto("https://rhbooks.com.ng", { waitUntil: "domcontentloaded", timeout: 45000 });
+    await page.waitForTimeout(2000);
+
+    let pageNum = 1;
+    while (pageNum <= maxPages) {
+      const targetApiUrl = `https://rhbooks.com.ng/wp-json/wc/store/v1/products?per_page=${ITEMS_PER_PAGE}&page=${pageNum}`;
+
+      // 2. Fetch WooCommerce REST API JSON inside cleared browser context
+      const products = await page.evaluate(async (apiUrl) => {
+        try {
+          const res = await fetch(apiUrl, {
+            headers: { "Accept": "application/json" },
+          });
+          if (!res.ok) return null;
+          return await res.json();
+        } catch (err) {
+          return null;
+        }
+      }, targetApiUrl);
+
+      if (!Array.isArray(products) || products.length === 0) {
+        console.log(`  ✓ rovingheights: Catalog pagination complete at page ${pageNum - 1}.`);
+        break;
+      }
+
+      for (const item of products) {
+        const rawPrice = parseInt(item.prices?.price || "0", 10) / 100;
+        const vendorPrice = rawPrice > 0 ? rawPrice : null;
+        const retailPrice = calculateRetailPrice(vendorPrice);
+
+        const desc = generateDescription(item);
+        const coverImage = item.images?.[0]?.src || "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=800";
+        const authorText = item.images?.[0]?.alt || item.categories?.[0]?.name || "";
+        const author = cleanAuthor(authorText);
+        const slug = item.slug || item.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+        const rawCategory = item.categories?.[0]?.name || "General";
+        const classifiedCategory = classifyBookCategory 
+          ? classifyBookCategory({ title: item.name, description: desc, category: rawCategory }) 
+          : rawCategory;
+
+        books.push({
+          id: `rovingheights-${pageNum}-${slug}`,
+          title: item.name,
+          author: author,
+          description: desc,
+          coverImage: coverImage,
+          vendorPrice: vendorPrice,
+          retailPrice: retailPrice,
+          sourceVendor: "rovingheights",
+          sourceUrl: item.permalink || `https://rhbooks.com.ng/product/${slug}/`,
+          category: classifiedCategory,
+          inStock: item.is_in_stock ?? true,
+          stockQuantity: item.low_stock_remaining !== undefined ? item.low_stock_remaining : null,
+          rating: 4.8,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+
+      console.log(`  ✓ rovingheights Page ${pageNum}: Fetched ${products.length} items.`);
+      pageNum++;
+      await page.waitForTimeout(1000);
+    }
+  } catch (err) {
+    console.warn(`  ⚠ Error fetching rovingheights via browser API:`, err.message);
+  } finally {
+    await context.close();
+  }
+
+  return books;
+}
+
+/**
+ * Fetches vendor catalog via native WooCommerce REST API (used for Retala & Masobe)
+ */
+async function fetchStandardWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_PER_VENDOR) {
   console.log(`--> Fetching REST API catalog from ${vendorSlug} (${baseUrl}) at ${ITEMS_PER_PAGE} items/page...`);
   const books = [];
   let page = 1;
@@ -161,13 +249,7 @@ async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_
   while (page <= maxPages) {
     try {
       const targetApiUrl = `${baseUrl}/wp-json/wc/store/v1/products?per_page=${ITEMS_PER_PAGE}&page=${page}`;
-      
-      // OPTION 1: Route Rovingheights through a CORS proxy wrapper to bypass WAF 403 blocks
-      const requestUrl = vendorSlug === "rovingheights"
-        ? `https://api.allorigins.win/raw?url=${encodeURIComponent(targetApiUrl)}`
-        : targetApiUrl;
-
-      const response = await fetch(requestUrl, {
+      const response = await fetch(targetApiUrl, {
         method: "GET",
         headers: browserHeaders,
       });
@@ -270,17 +352,33 @@ async function main() {
   console.log(`📦 Batch Size: ${ITEMS_PER_PAGE} items per page`);
   console.log("=========================================");
 
-  // Fetch from each vendor via REST API independently
-  const rovingBooks = await fetchWooCommerceVendor("https://rhbooks.com.ng", "rovingheights");
-  const retalaBooks = await fetchWooCommerceVendor("https://retala.com.ng", "retala");
-  const masobeBooks = await fetchWooCommerceVendor("https://masobebooks.com/ng", "masobe");
+  let browser;
+  let rovingBooks = [];
+
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+
+    // 1. Fetch Rovingheights via Playwright Browser API Context
+    rovingBooks = await fetchRovingheightsViaBrowserApi(browser);
+  } catch (err) {
+    console.warn("⚠ Browser initialization error for Rovingheights:", err.message);
+  } finally {
+    if (browser) await browser.close();
+  }
+
+  // 2. Fetch Retala and Masobe via native HTTP REST API
+  const retalaBooks = await fetchStandardWooCommerceVendor("https://retala.com.ng", "retala");
+  const masobeBooks = await fetchStandardWooCommerceVendor("https://masobebooks.com/ng", "masobe");
 
   const combined = [...rovingBooks, ...retalaBooks, ...masobeBooks];
 
-  // 1. Save local snapshot
+  // 3. Save local snapshot
   persistCatalog(combined);
 
-  // 2. Direct Sync to Firestore if Admin SDK credentials are active
+  // 4. Direct Sync to Firestore if Admin SDK credentials are active
   if (getApps().length && combined.length > 0) {
     console.log("Uploading catalog records directly to Firestore...");
     const db = getFirestore();
@@ -305,7 +403,8 @@ if (require.main === module) {
 }
 
 module.exports = {
-  fetchWooCommerceVendor,
+  fetchRovingheightsViaBrowserApi,
+  fetchStandardWooCommerceVendor,
   calculateRetailPrice,
   cleanPriceString,
   cleanAuthor,

@@ -28,12 +28,18 @@ if (!getApps().length && process.env.FIREBASE_PROJECT_ID) {
   });
 }
 
-const db = getFirestore();
-
 async function seed() {
   console.log("==========================================");
   console.log("🌱 Digital Concierge Bookstore Seeder");
   console.log("==========================================");
+
+  if (!getApps().length) {
+    console.error("❌ Firebase Admin SDK is not initialized. Verify FIREBASE_PROJECT_ID in your environment.");
+    process.exitCode = 1;
+    return;
+  }
+
+  const db = getFirestore();
 
   try {
     // Dynamically import auxiliary reference data
