@@ -1,24 +1,39 @@
 /**
  * Standalone REST API Catalog Ingestion Engine
- * Syncs catalog data from Masobe Books, Rovingheights, and Retala into local JSON
+ * Syncs catalog data from Masobe Books, Rovingheights, and Retala into Firestore & JSON
  * Batch Size: 24 items per page via WooCommerce REST APIs
- * Uses ScraperAPI proxy for Rovingheights to bypass Cloudflare WAF on GitHub Actions
  * Run via cron / CLI: node scripts/scrape.js
  * Cron schedule: Twice per week (Mon/Thu 2:00 AM UTC)
  */
 
 const fs = require("fs");
 const path = require("path");
+const { initializeApp, cert, getApps } = require("firebase-admin/app");
+const { getFirestore } = require("firebase-admin/firestore");
 const { loadEnvConfig } = require("@next/env");
 const { BOOK_CATEGORIES, classifyBookCategory } = require("../lib/categoryTaxonomy");
 
 // Load environment variables from project root
 loadEnvConfig(path.join(__dirname, ".."));
 
+// Initialize Firebase Admin SDK safely using subpath imports
+if (!getApps().length && process.env.FIREBASE_PROJECT_ID) {
+  initializeApp({
+    credential: cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY
+        ?.trim()
+        .replace(/^['"]|['"]$/g, "")
+        .replace(/\\n/g, "\n"),
+    }),
+  });
+}
+
 // Configurable constants
 const RETAIL_MARKUP_PERCENT = 0.10; // 10% Retail Markup
 const ITEMS_PER_PAGE = 24; // 24 items per page request
-const MAX_PAGES_PER_VENDOR = Number(process.env.MAX_PAGES) || 50;
+const MAX_PAGES_PER_VENDOR = Number(process.env.MAX_PAGES) || 500; // Raised to 500 to fetch full catalogs
 
 /**
  * Calculates retail price with 10% markup rounded up to nearest ₦100
@@ -125,14 +140,12 @@ const generateDescription = (item) => {
 };
 
 /**
- * Fetches vendor catalog via WooCommerce REST API in batches of 24
- * Routes Rovingheights through ScraperAPI proxy to bypass Cloudflare on GitHub Actions
+ * Fetches vendor catalog via WooCommerce REST API with dynamic complete-catalog pagination
  */
 async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_PER_VENDOR) {
   console.log(`--> Fetching REST API catalog from ${vendorSlug} (${baseUrl}) at ${ITEMS_PER_PAGE} items/page...`);
   const books = [];
   let page = 1;
-  const scraperApiKey = process.env.SCRAPER_API_KEY;
 
   const browserHeaders = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -144,20 +157,30 @@ async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_
     "Pragma": "no-cache",
   };
 
+  const apiKey = process.env.SCRAPER_API_KEY;
+
   while (page <= maxPages) {
     try {
       const targetApiUrl = `${baseUrl}/wp-json/wc/store/v1/products?per_page=${ITEMS_PER_PAGE}&page=${page}`;
       
-      // Route Rovingheights through ScraperAPI proxy if secret key is present
+      // Route Rovingheights through ScraperAPI or fallback proxy
       let requestUrl = targetApiUrl;
-      if (vendorSlug === "rovingheights" && scraperApiKey) {
-        requestUrl = `http://api.scraperapi.com?api_key=${scraperApiKey}&url=${encodeURIComponent(targetApiUrl)}`;
+      if (vendorSlug === "rovingheights") {
+        requestUrl = apiKey
+          ? `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(targetApiUrl)}`
+          : `https://api.allorigins.win/raw?url=${encodeURIComponent(targetApiUrl)}`;
       }
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
 
       const response = await fetch(requestUrl, {
         method: "GET",
         headers: browserHeaders,
+        signal: controller.signal,
       });
+
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         console.warn(`  ⚠ ${vendorSlug} API page ${page} returned status ${response.status}. Ending pagination.`);
@@ -166,7 +189,7 @@ async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_
 
       const products = await response.json();
       if (!Array.isArray(products) || products.length === 0) {
-        console.log(`  ✓ ${vendorSlug}: Catalog pagination complete at page ${page - 1}.`);
+        console.log(`  ✓ ${vendorSlug}: Full catalog complete at page ${page - 1}.`);
         break;
       }
 
@@ -257,14 +280,19 @@ async function main() {
   console.log(`📦 Batch Size: ${ITEMS_PER_PAGE} items per page`);
   console.log("=========================================");
 
-  // Fetch from each vendor via REST API independently
+  // Fetch full catalogs from all vendors
   const rovingBooks = await fetchWooCommerceVendor("https://rhbooks.com.ng", "rovingheights");
   const retalaBooks = await fetchWooCommerceVendor("https://retala.com.ng", "retala");
   const masobeBooks = await fetchWooCommerceVendor("https://masobebooks.com/ng", "masobe");
 
   const combined = [...rovingBooks, ...retalaBooks, ...masobeBooks];
 
-  // Save local snapshot to scraped_catalog.json and categoryFilters.json
+  if (combined.length === 0) {
+    console.error("❌ Error: Total combined catalog is empty. Check network connection or API gateways.");
+    return;
+  }
+
+  // Save local JSON snapshot
   persistCatalog(combined);
 
   console.log("\n✅ Catalog ingestion complete.");
