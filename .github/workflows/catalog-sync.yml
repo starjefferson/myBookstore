@@ -2,7 +2,7 @@ name: Catalog Scrape and Seed
 
 on:
   schedule:
-    - cron: "0 2 * * 1,4"
+    - cron: "0 1 * * 1"
   workflow_dispatch:
 
 jobs:
