@@ -141,6 +141,7 @@ const generateDescription = (item) => {
 
 /**
  * Fetches vendor catalog via WooCommerce REST API in batches of 24
+ * Routes Rovingheights through a proxy wrapper to bypass Cloudflare/Wordfence WAF blocks (Option 1)
  */
 async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_PER_VENDOR) {
   console.log(`--> Fetching REST API catalog from ${vendorSlug} (${baseUrl}) at ${ITEMS_PER_PAGE} items/page...`);
@@ -153,20 +154,20 @@ async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": `${baseUrl}/`,
     "Origin": baseUrl,
-    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
   };
 
   while (page <= maxPages) {
     try {
-      const apiUrl = `${baseUrl}/wp-json/wc/store/v1/products?per_page=${ITEMS_PER_PAGE}&page=${page}`;
-      const response = await fetch(apiUrl, {
+      const targetApiUrl = `${baseUrl}/wp-json/wc/store/v1/products?per_page=${ITEMS_PER_PAGE}&page=${page}`;
+      
+      // OPTION 1: Route Rovingheights through a CORS proxy wrapper to bypass WAF 403 blocks
+      const requestUrl = vendorSlug === "rovingheights"
+        ? `https://api.allorigins.win/raw?url=${encodeURIComponent(targetApiUrl)}`
+        : targetApiUrl;
+
+      const response = await fetch(requestUrl, {
         method: "GET",
         headers: browserHeaders,
       });
