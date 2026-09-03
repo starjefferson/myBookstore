@@ -1,39 +1,55 @@
 /**
- * Standalone Playwright Scraper for Vendor Catalogs
+ * Standalone REST API Catalog Ingestion Engine
  * Syncs catalog data from Masobe Books, Rovingheights, and Retala into Firestore & JSON
- * Scrapes by category with pagination: up to 50 pages per category
+ * Batch Size: 24 items per page via WooCommerce REST APIs
  * Run via cron / CLI: node scripts/scrape.js
- * Cron schedule: Once per week, Monday 2:00 AM UTC
+ * Cron schedule: Twice per week (Mon/Thu 2:00 AM UTC)
  */
-const { chromium } = require("playwright");
+
 const fs = require("fs");
 const path = require("path");
+const admin = require("firebase-admin");
 const { loadEnvConfig } = require("@next/env");
 const { BOOK_CATEGORIES, classifyBookCategory } = require("../lib/categoryTaxonomy");
 
+// Load environment variables from project root
 loadEnvConfig(path.join(__dirname, ".."));
 
-const RETAIL_MARKUP_PERCENT = 0.10;
-const MAX_PAGES_PER_CATEGORY = 50; // Scrape up to 50 pages per category
-const AUTHOR_LOOKUP_CONCURRENCY = Number(process.env.AUTHOR_LOOKUP_CONCURRENCY) || 2;
-const SCRAPE_AUTHORS = process.env.SCRAPE_AUTHORS !== "false";
-const SCRAPE_MASOBE = process.env.SCRAPE_MASOBE === "true";
-const SCRAPE_FRESH = process.env.SCRAPE_FRESH === "true";
-const NAVIGATION_RETRIES = Number(process.env.SCRAPE_NAVIGATION_RETRIES) || 3;
-const NAVIGATION_TIMEOUT = Number(process.env.SCRAPE_NAVIGATION_TIMEOUT) || 30000;
-const SELECTOR_TIMEOUT = Number(process.env.SCRAPE_SELECTOR_TIMEOUT) || 15000;
+// Initialize Firebase Admin SDK safely across CommonJS / ESM wrappers
+const existingApps = admin.apps || admin.default?.apps;
+if (!existingApps?.length && process.env.FIREBASE_PROJECT_ID) {
+  const initializeApp = admin.initializeApp || admin.default?.initializeApp;
+  const credential = admin.credential || admin.default?.credential;
 
+  initializeApp({
+    credential: credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+    }),
+  });
+}
+
+// Configurable constants
+const RETAIL_MARKUP_PERCENT = 0.10; // 10% Retail Markup
+const ITEMS_PER_PAGE = 24; // 24 items per page request
+const MAX_PAGES_PER_VENDOR = Number(process.env.MAX_PAGES) || 50;
+
+/**
+ * Calculates retail price with 10% markup rounded up to nearest ₦100
+ */
 const calculateRetailPrice = (vendorPrice) => {
-  // If price is missing, unparsed, or <= 0, return null so it displays as unavailable
   if (!vendorPrice || isNaN(vendorPrice) || vendorPrice <= 0) return null;
-
   const markedUp = vendorPrice * (1 + RETAIL_MARKUP_PERCENT);
   return Math.ceil(markedUp / 100) * 100;
 };
 
+/**
+ * Cleans price input strings
+ */
 const cleanPriceString = (text) => {
   if (!text) return null;
-  const normalized = text.replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+  const normalized = String(text).replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
   const currencyMatches = normalized.match(/(?:₦|NGN)\s*[\d,]+(?:\.\d{1,2})?/gi) || [];
   const numberMatches = normalized.match(/\b\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?\b|\b\d+(?:\.\d{1,2})?\b/g) || [];
   const candidates = currencyMatches.length ? currencyMatches : numberMatches;
@@ -46,584 +62,224 @@ const cleanPriceString = (text) => {
   return null;
 };
 
-const parseStockStatus = (text) => {
-  if (!text) return true;
-  return !/(out\s*of\s*stock|sold\s*out|unavailable|not\s+available|coming\s+soon)/i.test(text);
+/**
+ * Strips HTML tags from raw descriptions
+ */
+const cleanDescription = (html) => {
+  if (!html) return "";
+  return html
+    .replace(/<[^>]*>?/gm, "")
+    .replace(/sourced\s+(?:through|from|via)\s+(?:Rovingheights|Retala|Masoba|Masobe)/gi, "sourced")
+    .replace(/published\s+by\s+(?:Rovingheights|Retala|Masoba|Masobe)/gi, "published")
+    .replace(/available\s+at\s+(?:Rovingheights|Retala|Masoba|Masobe)/gi, "available")
+    .replace(/\s+/g, " ")
+    .trim()
+    .substring(0, 500);
 };
 
-const isValidProductUrl = (value) => {
-  if (!value || /^(#|javascript:|about:|mailto:)/i.test(value)) return false;
-
-  try {
-    const parsed = new URL(value);
-    if (!/^https?:$/i.test(parsed.protocol) || !parsed.hostname) return false;
-    if (!parsed.pathname || parsed.pathname === "/") return false;
-    return /\/product\//i.test(parsed.pathname) && !/\/product-category\//i.test(parsed.pathname);
-  } catch (error) {
-    return false;
-  }
-};
-
-const isValidBookTitle = (value) => {
-  if (!value) return false;
-  const title = value.replace(/\s+/g, " ").trim();
-  return title.length >= 2 && !/^(books?|upcoming books?)$/i.test(title);
-};
-
-async function visitCatalogPage(page, url, selectors, options = {}) {
-  const retries = options.retries || NAVIGATION_RETRIES;
-  const timeout = options.timeout || NAVIGATION_TIMEOUT;
-  const selectorTimeout = options.selectorTimeout || SELECTOR_TIMEOUT;
-  let lastError;
-
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout });
-      await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
-      await page.waitForSelector(selectors, { state: "attached", timeout: selectorTimeout });
-      return true;
-    } catch (error) {
-      lastError = error;
-      console.warn(`   Page visit ${attempt}/${retries} failed for ${url}: ${error.message}`);
-      if (attempt < retries) {
-        await page.waitForTimeout(Math.min(1000 * attempt, 3000));
-      }
-    }
-  }
-
-  console.warn(`   Skipping page after ${retries} attempts: ${lastError?.message || url}`);
-  return false;
-}
-
+/**
+ * Cleans author names and strips genre/tag prefixes
+ */
 const cleanAuthor = (value) => {
-  if (!value) return "";
-  let author = value
+  if (!value) return "Featured Author";
+  let author = String(value)
     .replace(/^(by|author)\s*:\s*/i, "")
+    .replace(/^tags?\s*:\s*/i, "")
     .replace(/\s+/g, " ")
     .trim();
 
-  author = author.replace(/^tags?\s*:\s*/i, "");
   author = author.split(/\s*\d+(?:\.\d+)?\s*\/\s*5(?:\.0)?/i)[0].trim();
 
-  if (value.match(/^tags?\s*:/i)) {
-    return `Tags: ${author}`;
-  }
+  const ignoredKeywords = [
+    "fiction", "african literature", "business", "memoir", "books",
+    "mystery", "thriller", "ya", "short stories", "niger delta",
+    "political", "fantasy", "poetry", "literary fiction", "romance",
+    "children's books", "middle grade", "biafra", "civil war", "non-fiction"
+  ];
 
-  if (!author || /^(fiction|african literature|business|memoir|books?)$/i.test(author)) {
-    return "";
+  if (!author || ignoredKeywords.includes(author.toLowerCase())) {
+    return "Featured Author";
   }
 
   return author;
 };
 
-const generateDescription = (item) => {
-  if (item.description && item.description.trim() && item.description.length > 20) {
-    return item.description
-      .replace(/sourced\s+(?:through|from|via)\s+(?:Rovingheights|Retala|Masoba|Masobe)/gi, "sourced")
-      .replace(/published\s+by\s+(?:Rovingheights|Retala|Masoba|Masobe)/gi, "published")
-      .replace(/available\s+at\s+(?:Rovingheights|Retala|Masoba|Masobe)/gi, "available")
-      .trim()
-      .substring(0, 500);
+/**
+ * Validates product URL format
+ */
+const isValidProductUrl = (value) => {
+  if (!value || /^(#|javascript:|about:|mailto:)/i.test(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return /^https?:$/i.test(parsed.protocol) && Boolean(parsed.hostname);
+  } catch (error) {
+    return false;
   }
-  return `Authentic physical edition of "${item.title}" by ${item.authorText || "Unknown Author"}.`;
 };
 
-async function addAuthorDetails(page, items, options = {}) {
-  if (!SCRAPE_AUTHORS) return items;
-  const lookupTimeout = options.timeout || 15000;
-  const loadTimeout = options.loadTimeout || 10000;
+/**
+ * Validates book title length and quality
+ */
+const isValidBookTitle = (value) => {
+  if (!value) return false;
+  const title = String(value).replace(/\s+/g, " ").trim();
+  return title.length >= 2 && !/^(books?|upcoming books?)$/i.test(title);
+};
 
-  const pendingItems = items.filter((item) =>
-    !cleanAuthor(item.authorText) && isValidProductUrl(item.sourceUrl)
-  );
-  let nextItemIndex = 0;
+/**
+ * Generates fallback description if empty
+ */
+const generateDescription = (item) => {
+  const cleaned = cleanDescription(item.description || item.short_description);
+  if (cleaned && cleaned.length > 20) return cleaned;
+  return `Authentic physical edition of "${item.name}" by ${cleanAuthor(item.images?.[0]?.alt)}.`;
+};
 
-  const lookupAuthor = async () => {
-    const detailPage = await page.context().newPage();
+/**
+ * Fetches vendor catalog via WooCommerce REST API in batches of 24
+ */
+async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_PER_VENDOR) {
+  console.log(`--> Fetching REST API catalog from ${vendorSlug} (${baseUrl}) at ${ITEMS_PER_PAGE} items/page...`);
+  const books = [];
+  let page = 1;
 
+  while (page <= maxPages) {
     try {
-      while (nextItemIndex < pendingItems.length) {
-        const item = pendingItems[nextItemIndex++];
-
-        try {
-          await detailPage.goto(item.sourceUrl, {
-            waitUntil: "commit",
-            timeout: lookupTimeout
-          });
-          await detailPage.waitForLoadState("domcontentloaded", { timeout: loadTimeout }).catch(() => {});
-
-          item.authorText = await detailPage.evaluate(() => {
-            const selectors = [
-              "[itemprop='author']", ".product-author", ".book-author", ".author-name",
-              "[rel='author']", ".byline", ".woocommerce-product-details__short-description .author"
-            ];
-
-            for (const selector of selectors) {
-              const element = document.querySelector(selector);
-              const value = element?.textContent?.trim();
-              if (value) return value;
-            }
-
-            for (const row of document.querySelectorAll("tr")) {
-              const cells = Array.from(row.querySelectorAll("th, td"));
-              const label = cells[0]?.textContent?.trim().replace(/\s+/g, " ");
-              const value = cells[1]?.textContent?.trim().replace(/\s+/g, " ");
-              if (/^author\s*:?$/i.test(label || "") && value) return value;
-            }
-
-            for (const script of document.querySelectorAll("script[type='application/ld+json']")) {
-              try {
-                const data = JSON.parse(script.textContent);
-                const records = Array.isArray(data) ? data : [data, ...(data?.['@graph'] || [])];
-                for (const record of records) {
-                  const author = record?.author;
-                  const name = Array.isArray(author)
-                    ? author.map((entry) => entry?.name || entry).filter(Boolean).join(", ")
-                    : author?.name || author;
-                  if (name && typeof name === "string") return name.trim();
-                }
-              } catch (error) {
-                // Ignore malformed structured data and continue with other sources.
-              }
-            }
-
-            const metaAuthor = document.querySelector("meta[name='author'], meta[property='article:author']")?.content;
-            if (metaAuthor?.trim()) return metaAuthor.trim();
-
-            const tagElements = document.querySelectorAll(".tagged_as a, .tags a, a[rel='tag']");
-            const tags = Array.from(tagElements)
-              .map((element) => element.textContent.trim())
-              .filter(Boolean);
-            return tags.length ? `Tags: ${tags.join(", ")}` : "";
-          });
-        } catch (error) {
-          console.warn(`   Author lookup failed for ${item.title}: ${error.message}`);
-          if (/Target page, context or browser has been closed/i.test(error.message)) {
-            return;
-          }
-        }
-      }
-    } finally {
-      await detailPage.close();
-    }
-  };
-
-  const workerCount = Math.min(
-    options.concurrency || AUTHOR_LOOKUP_CONCURRENCY,
-    pendingItems.length
-  );
-  await Promise.all(Array.from({ length: workerCount }, () => lookupAuthor()));
-
-  return items;
-}
-
-/**
- * 1. Scrape Masoba Books with Category Pagination
- * URL: https://masobebooks.com/ng/bookstore/page/1/
- */
-async function scrapeMasoba(page) {
-  console.log("--> Scraping Masoba Books catalog (6 pages)...");
-  const books = [];
-  
-  try {
-    // Scrape all 6 pages
-    for (let pageNum = 1; pageNum <= 6; pageNum++) {
-      const url = `https://masobebooks.com/ng/bookstore/page/${pageNum}/`;
-      console.log(`   • Page ${pageNum}/6: ${url}`);
-      
-      const pageLoaded = await visitCatalogPage(
-        page,
-        url,
-        ".product, .type-product, .book-item, article"
-      );
-      if (!pageLoaded) {
-        continue;
-      }
-
-      const items = await page.$$eval(".product, .type-product, .book-item, article", (elements) => {
-        return elements.map((el) => {
-          const titleEl = el.querySelector(".woocommerce-loop-product__title, .product-title, h2, h3");
-          const priceEl = el.querySelector(".price, .amount, .woocommerce-Price-amount");
-          const authorEl = el.querySelector("[itemprop='author'], .product-author, .book-author, .author-name");
-          const imgEl = el.querySelector("img");
-          const linkEl = el.querySelector(".woocommerce-loop-product__title a, h2 a, h3 a, a[href*='/product/'], a[href]");
-          const categoryEl = el.querySelector(".product-category, .cat-links, .category");
-          const descEl = el.querySelector(".woocommerce-product-details__short-description, .product-description, .short-description, p");
-
-          return {
-            title: titleEl ? titleEl.innerText.trim() : "",
-            authorText: authorEl ? authorEl.innerText.trim() : "",
-            priceText: priceEl ? priceEl.innerText.trim() : "",
-            stockText: el.innerText.trim(),
-            coverImage: imgEl ? (imgEl.getAttribute("data-src") || imgEl.getAttribute("data-lazy-src") || imgEl.getAttribute("data-original") || imgEl.getAttribute("srcset")?.split(",")[0]?.trim().split(" ")[0] || imgEl.getAttribute("src") || "") : "",
-            sourceUrl: linkEl ? linkEl.href : "",
-            category: categoryEl ? categoryEl.innerText.trim() : "African Literature",
-            description: descEl ? descEl.innerText.trim() : ""
-          };
-        });
+      const apiUrl = `${baseUrl}/wp-json/wc/store/v1/products?per_page=${ITEMS_PER_PAGE}&page=${page}`;
+      const response = await fetch(apiUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        },
       });
 
-      await addAuthorDetails(page, items);
+      if (!response.ok) {
+        console.warn(`  ⚠ ${vendorSlug} API page ${page} returned status ${response.status}. Ending pagination.`);
+        break;
+      }
 
-      const pageBooks = [];
-      for (const item of items) {
-        if (!isValidBookTitle(item.title) || !isValidProductUrl(item.sourceUrl)) continue;
-        
-        const vendorPrice = cleanPriceString(item.priceText);
-        if (!vendorPrice) continue;
+      const products = await response.json();
+      if (!Array.isArray(products) || products.length === 0) {
+        console.log(`  ✓ ${vendorSlug}: Catalog pagination complete at page ${page - 1}.`);
+        break;
+      }
+
+      for (const item of products) {
+        // Convert minor price units (kobo/cents) to Naira
+        const rawPrice = parseInt(item.prices?.price || "0", 10) / 100;
+        const vendorPrice = rawPrice > 0 ? rawPrice : null;
         const retailPrice = calculateRetailPrice(vendorPrice);
-        const slug = item.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").substring(0, 50);
 
-        pageBooks.push({
-          id: `masobe-${pageNum}-${slug}`,
-          title: item.title,
-          author: cleanAuthor(item.authorText) || "Unknown Author",
-          description: generateDescription(item),
-          coverImage: item.coverImage || "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=800",
+        const desc = generateDescription(item);
+        const coverImage = item.images?.[0]?.src || "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=800";
+        const authorText = item.images?.[0]?.alt || item.categories?.[0]?.name || "";
+        const author = cleanAuthor(authorText);
+        const slug = item.slug || item.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+        const rawCategory = item.categories?.[0]?.name || "General";
+        const classifiedCategory = classifyBookCategory 
+          ? classifyBookCategory({ title: item.name, description: desc, category: rawCategory }) 
+          : rawCategory;
+
+        books.push({
+          id: `${vendorSlug}-${page}-${slug}`,
+          title: item.name,
+          author: author,
+          description: desc,
+          coverImage: coverImage,
           vendorPrice: vendorPrice,
           retailPrice: retailPrice,
-          sourceVendor: "masoba",
-          sourceUrl: item.sourceUrl,
-          category: classifyBookCategory(item),
-          inStock: parseStockStatus(item.stockText),
+          sourceVendor: vendorSlug,
+          sourceUrl: item.permalink || `${baseUrl}/product/${slug}/`,
+          category: classifiedCategory,
+          inStock: item.is_in_stock ?? true,
+          stockQuantity: item.low_stock_remaining !== undefined ? item.low_stock_remaining : null,
           rating: 4.8,
-          updatedAt: new Date().toISOString()
+          updatedAt: new Date().toISOString(),
         });
       }
-      books.push(...pageBooks);
+
+      console.log(`  ✓ ${vendorSlug} Page ${page}: Fetched ${products.length} items.`);
+      page++;
+    } catch (err) {
+      console.warn(`  ⚠ Error fetching ${vendorSlug} page ${page}:`, err.message);
+      break;
     }
-  } catch (err) {
-    console.warn("Masoba scraper warning:", err.message);
   }
-  
-  return books;
-}
 
-
-/**
- * 2. Scrape Rovingheights with Pagination
- * URL: https://rhbooks.com.ng/shop-2/ and /page/N/ for later pages
- */
-async function scrapeRovingheights(page, options = {}) {
-  console.log("--> Scraping Rovingheights catalog...");
-  const books = [];
-  const startPage = options.startPage || 1;
-  
-  try {
-    // Scrape up to MAX_PAGES_PER_CATEGORY pages
-    for (let pageNum = startPage; pageNum <= MAX_PAGES_PER_CATEGORY; pageNum++) {
-      const url = pageNum === 1
-        ? "https://rhbooks.com.ng/shop-2/"
-        : `https://rhbooks.com.ng/shop-2/page/${pageNum}/`;
-      console.log(`   • Page ${pageNum}/${MAX_PAGES_PER_CATEGORY}: ${url}`);
-      
-      const pageLoaded = await visitCatalogPage(
-        page,
-        url,
-        ".product, .product-grid-item, .wd-entities"
-      );
-      if (!pageLoaded) {
-        console.log(`   ⚠ Skipping page ${pageNum}; continuing pagination`);
-        continue;
-      }
-
-      const items = await page.$$eval(".product, .product-grid-item, .wd-entities", (elements) => {
-        return elements.map((el) => {
-          const titleEl = el.querySelector(".wd-entities-title, .woocommerce-loop-product__title, h3, h2");
-          const priceEl = el.querySelector(".price, .amount");
-          const authorEl = el.querySelector(
-            "[itemprop='author'], .product-author, .book-author, .author-name, .tagged_as, .tags"
-          );
-          const imgEl = el.querySelector("img");
-          const linkEl = el.querySelector(".wd-entities-title a, .woocommerce-loop-product__title a, h2 a, h3 a, a[href*='/product/'], a[href]");
-          const categoryEl = el.querySelector(".product-category, .cat-links");
-
-          return {
-            title: titleEl ? titleEl.innerText.trim() : "",
-            authorText: authorEl ? authorEl.innerText.trim() : "",
-            priceText: priceEl ? priceEl.innerText.trim() : "",
-            stockText: el.innerText.trim(),
-            coverImage: imgEl ? (imgEl.getAttribute("data-src") || imgEl.getAttribute("data-lazy-src") || imgEl.getAttribute("data-original") || imgEl.getAttribute("srcset")?.split(",")[0]?.trim().split(" ")[0] || imgEl.getAttribute("src") || "") : "",
-            sourceUrl: linkEl ? linkEl.href : "",
-            category: categoryEl ? categoryEl.innerText.trim() : ""
-          };
-        });
-      });
-
-      await addAuthorDetails(page, items, {
-        concurrency: AUTHOR_LOOKUP_CONCURRENCY,
-        timeout: 15000,
-        loadTimeout: 10000
-      });
-
-      if (page.isClosed()) {
-        throw new Error("Rovingheights browser page closed during author lookups; stopping to preserve the checkpoint.");
-      }
-
-      if (items.length === 0) {
-        console.log(`   ⚠ No items found on page ${pageNum}, stopping pagination`);
-        break;
-      }
-
-      const pageBooks = [];
-      for (const item of items) {
-        if (!isValidBookTitle(item.title) || !isValidProductUrl(item.sourceUrl)) continue;
-        
-        const vendorPrice = cleanPriceString(item.priceText);
-        if (!vendorPrice) continue;
-        const retailPrice = calculateRetailPrice(vendorPrice);
-        const slug = item.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").substring(0, 50);
-
-        pageBooks.push({
-          id: `roving-${pageNum}-${slug}`,
-          title: item.title,
-          author: cleanAuthor(item.authorText) || "Unknown Author",
-          description: generateDescription(item),
-          coverImage: item.coverImage || "https://images.unsplash.com/photo-1512820790803-83ca734da794?auto=format&fit=crop&q=80&w=800",
-          vendorPrice: vendorPrice,
-          retailPrice: retailPrice,
-          sourceVendor: "rovingheights",
-          sourceUrl: item.sourceUrl,
-          category: classifyBookCategory(item),
-          inStock: parseStockStatus(item.stockText),
-          rating: 4.9,
-          updatedAt: new Date().toISOString()
-        });
-      }
-      books.push(...pageBooks);
-
-      if (options.onPageComplete) {
-        await options.onPageComplete(pageNum, pageBooks);
-      }
-    }
-  } catch (err) {
-    console.warn("Rovingheights scraper warning:", err.message);
-  }
-  
-  return books;
-}
-
-
-/**
- * 3. Scrape Retala with Category Dropdown & Pagination
- * URL: https://retala.com.ng/product-category/books/
- */
-async function scrapeRetala(page, options = {}) {
-  console.log("--> Scraping Retala catalog...");
-  const books = [];
-  
-  try {
-    console.log("   • Scraping books category with pagination...");
-    await scrapeSingleRetalaPage(
-      page,
-      books,
-      "https://retala.com.ng/product-category/books/",
-      "Books",
-      options
-    );
-
-  } catch (err) {
-    console.warn("Retala scraper warning:", err.message);
-  }
-  
   return books;
 }
 
 /**
- * Helper: Scrape a single Retala page with pagination
+ * Saves local catalog snapshot and category counts filter file
  */
-async function scrapeSingleRetalaPage(page, books, baseUrl, categoryName, options = {}) {
-  try {
-    const startPage = options.startPage || 1;
-    for (let pageNum = startPage; pageNum <= MAX_PAGES_PER_CATEGORY; pageNum++) {
-      let url = baseUrl;
-      if (pageNum > 1) {
-        url = baseUrl.includes("?") ? `${baseUrl}&paged=${pageNum}` : `${baseUrl}?paged=${pageNum}`;
-      }
-      
-      console.log(`   • Page ${pageNum}/${MAX_PAGES_PER_CATEGORY}: ${categoryName}`);
-      
-      const pageLoaded = await visitCatalogPage(page, url, ".product, .type-product, article");
-      if (!pageLoaded) {
-        break;
-      }
-
-      const items = await page.$$eval(".product, .type-product, article", (elements) => {
-        return elements.map((el) => {
-          const titleEl = el.querySelector(".woocommerce-loop-product__title, .product-title, h2, h3");
-          const priceEl = el.querySelector(".price, .amount");
-          const authorEl = el.querySelector("[itemprop='author'], .product-author, .book-author, .author-name");
-          const imgEl = el.querySelector("img");
-          const linkEl = el.querySelector(".woocommerce-loop-product__title a, h2 a, h3 a, a[href*='/product/'], a[href]");
-
-          return {
-            title: titleEl ? titleEl.innerText.trim() : "",
-            authorText: authorEl ? authorEl.innerText.trim() : "",
-            priceText: priceEl ? priceEl.innerText.trim() : "",
-            stockText: el.innerText.trim(),
-            coverImage: imgEl ? (imgEl.getAttribute("data-src") || imgEl.getAttribute("data-lazy-src") || imgEl.getAttribute("data-original") || imgEl.getAttribute("srcset")?.split(",")[0]?.trim().split(" ")[0] || imgEl.getAttribute("src") || "") : "",
-            sourceUrl: linkEl ? linkEl.href : ""
-          };
-        });
-      });
-
-      await addAuthorDetails(page, items);
-
-      if (items.length === 0) {
-        console.log(`   ⚠ No items found on page ${pageNum}, stopping pagination`);
-        break;
-      }
-
-      const pageBooks = [];
-      for (const item of items) {
-        if (!isValidBookTitle(item.title) || !isValidProductUrl(item.sourceUrl)) continue;
-        
-        const vendorPrice = cleanPriceString(item.priceText);
-        if (!vendorPrice) continue;
-        const retailPrice = calculateRetailPrice(vendorPrice);
-        const slug = item.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").substring(0, 50);
-
-        pageBooks.push({
-          id: `retala-${pageNum}-${slug}`,
-          title: item.title,
-          author: cleanAuthor(item.authorText) || "Unknown Author",
-          description: generateDescription(item),
-          coverImage: item.coverImage || "https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&q=80&w=800",
-          vendorPrice: vendorPrice,
-          retailPrice: retailPrice,
-          sourceVendor: "retala",
-          sourceUrl: item.sourceUrl,
-          category: classifyBookCategory({ ...item, category: categoryName }),
-          inStock: parseStockStatus(item.stockText),
-          rating: 4.8,
-          updatedAt: new Date().toISOString()
-        });
-      }
-
-      books.push(...pageBooks);
-
-      if (options.onPageComplete) {
-        await options.onPageComplete(pageNum, pageBooks);
-      }
-    }
-  } catch (err) {
-    console.warn(`Retala ${categoryName} page scraper warning:`, err.message);
-  }
-}
-
 function persistCatalog(books) {
   const validBooks = books.filter((book) =>
     isValidBookTitle(book.title) && isValidProductUrl(book.sourceUrl)
   );
+
   const outputPath = path.join(__dirname, "../scraped_catalog.json");
   fs.writeFileSync(outputPath, JSON.stringify(validBooks, null, 2), "utf-8");
 
   const categoriesSet = new Set(validBooks.map((book) => book.category).filter(Boolean));
-  const uniqueCategories = BOOK_CATEGORIES.filter((category) => categoriesSet.has(category));
+  const uniqueCategories = BOOK_CATEGORIES ? BOOK_CATEGORIES.filter((category) => categoriesSet.has(category)) : Array.from(categoriesSet);
   const filterPath = path.join(__dirname, "../lib/categoryFilters.json");
-  fs.writeFileSync(filterPath, JSON.stringify({
-    version: 1,
-    lastUpdated: new Date().toISOString(),
-    categories: uniqueCategories.map((category) => ({
-      id: category.toLowerCase().replace(/\s+/g, "-"),
-      name: category,
-      count: validBooks.filter((book) => book.category === category).length
-    }))
-  }, null, 2), "utf-8");
+  
+  fs.writeFileSync(
+    filterPath,
+    JSON.stringify(
+      {
+        version: 1,
+        lastUpdated: new Date().toISOString(),
+        categories: uniqueCategories.map((category) => ({
+          id: category.toLowerCase().replace(/\s+/g, "-"),
+          name: category,
+          count: validBooks.filter((book) => book.category === category).length,
+        })),
+      },
+      null,
+      2
+    ),
+    "utf-8"
+  );
 
-  console.log(`✓ Checkpoint saved: ${validBooks.length} books`);
+  console.log(`\n✓ Saved checkpoint: ${validBooks.length} valid books written to scraped_catalog.json & categoryFilters.json`);
 }
 
 async function main() {
   console.log("=========================================");
-  console.log("🚀 Starting Playwright Catalog Scraper...");
-  console.log("🔄 Schedule: 2x per week (Mon/Thu)");
-  console.log("📖 Max pages per category: " + MAX_PAGES_PER_CATEGORY);
-  console.log(`🏪 Vendors: Rovingheights, Retala${SCRAPE_MASOBE ? ", Masobe" : ""}`);
+  console.log("🚀 Starting WooCommerce REST API Catalog Ingestion...");
+  console.log(`📦 Batch Size: ${ITEMS_PER_PAGE} items per page`);
   console.log("=========================================");
 
-  let browser;
-  try {
-    let scrapedBooks = [];
-    if (!SCRAPE_FRESH && fs.existsSync(path.join(__dirname, "../scraped_catalog.json"))) {
-      try {
-        scrapedBooks = JSON.parse(fs.readFileSync(path.join(__dirname, "../scraped_catalog.json"), "utf-8"))
-          .filter((book) => isValidBookTitle(book.title) && isValidProductUrl(book.sourceUrl));
-        console.log(`↻ Resuming from scraped_catalog.json: ${scrapedBooks.length} saved books`);
-      } catch (error) {
-        console.warn(`⚠ Could not read scraped_catalog.json; starting fresh: ${error.message}`);
+  // Fetch from each vendor via REST API
+  const rovingBooks = await fetchWooCommerceVendor("https://rhbooks.com.ng", "rovingheights");
+  const retalaBooks = await fetchWooCommerceVendor("https://retala.com.ng", "retala");
+  const masobeBooks = await fetchWooCommerceVendor("https://masobebooks.com/ng", "masobe");
+
+  const combined = [...rovingBooks, ...retalaBooks, ...masobeBooks];
+
+  // 1. Save local snapshot
+  persistCatalog(combined);
+
+  // 2. Direct Sync to Firestore if Admin SDK credentials are active
+  const dbInstance = admin.firestore || admin.default?.firestore;
+  if (existingApps?.length && dbInstance && combined.length > 0) {
+    console.log("Uploading catalog records directly to Firestore...");
+    const db = dbInstance();
+    const batch = db.batch();
+    
+    combined.forEach((book) => {
+      if (isValidBookTitle(book.title) && isValidProductUrl(book.sourceUrl)) {
+        const docRef = db.collection("books").doc(book.id);
+        batch.set(docRef, book, { merge: true });
       }
-    } else if (SCRAPE_FRESH) {
-      console.log("↻ Starting a fresh scrape; ignoring the existing catalog.");
-    }
-
-    const highestPage = (vendor, prefix = vendor) => scrapedBooks
-      .filter((book) => book.sourceVendor === vendor)
-      .map((book) => Number(book.id.match(new RegExp(`^${prefix}-(\\d+)-`))?.[1]) || 0)
-      .reduce((highest, page) => Math.max(highest, page), 0);
-    const rovingheightsNextPage = highestPage("rovingheights", "roving") + 1;
-    const retalaNextPage = highestPage("retala") + 1;
-
-    browser = await chromium.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
 
-    const context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    });
-
-    const page = await context.newPage();
-
-    if (SCRAPE_MASOBE && !scrapedBooks.some((book) => book.sourceVendor === "masoba")) {
-      const masobeBooks = await scrapeMasoba(page);
-      console.log(`✓ Masoba scraped: ${masobeBooks.length} items`);
-      if (masobeBooks.length === 0) {
-        throw new Error("Masobe returned zero books; keeping the previous checkpoint and stopping.");
-      }
-      scrapedBooks.push(...masobeBooks);
-      persistCatalog(scrapedBooks);
-    }
-
-    if (rovingheightsNextPage <= MAX_PAGES_PER_CATEGORY) {
-      const rovingBooks = await scrapeRovingheights(page, {
-        startPage: rovingheightsNextPage,
-        onPageComplete: async (pageNum, pageBooks) => {
-          scrapedBooks.push(...pageBooks);
-          persistCatalog(scrapedBooks);
-        }
-      });
-      console.log(`✓ Rovingheights scraped: ${rovingBooks.length} items`);
-      const savedRovingheightsBooks = scrapedBooks.filter(
-        (book) => book.sourceVendor === "rovingheights"
-      ).length;
-      if (rovingBooks.length === 0 && savedRovingheightsBooks === 0) {
-        throw new Error("Rovingheights returned zero books; keeping the previous checkpoint and stopping.");
-      }
-    }
-
-    if (retalaNextPage <= MAX_PAGES_PER_CATEGORY) {
-      const retalaBooks = await scrapeRetala(page, {
-        startPage: retalaNextPage,
-        onPageComplete: async (pageNum, pageBooks) => {
-          scrapedBooks.push(...pageBooks);
-          persistCatalog(scrapedBooks);
-        }
-      });
-      console.log(`✓ Retala scraped: ${retalaBooks.length} items`);
-      if (retalaBooks.length === 0) {
-        throw new Error("Retala returned zero books; keeping the previous checkpoint and stopping.");
-      }
-    }
-
-    persistCatalog(scrapedBooks);
-    console.log("\n✅ Scraping complete. Run npm run seed when the catalog is ready.");
-  } catch (error) {
-    console.error("Scraping execution error:", error);
-    process.exitCode = 1;
-  } finally {
-    if (browser) await browser.close();
+    await batch.commit();
+    console.log(`✓ Successfully updated ${combined.length} books in Firestore.`);
   }
+
+  console.log("\n✅ Catalog ingestion complete.");
 }
 
 if (require.main === module) {
@@ -631,15 +287,12 @@ if (require.main === module) {
 }
 
 module.exports = {
-  scrapeMasoba,
-  scrapeRovingheights,
-  scrapeRetala,
-  scrapeSingleRetalaPage,
+  fetchWooCommerceVendor,
   calculateRetailPrice,
   cleanPriceString,
-  parseStockStatus,
-  isValidProductUrl,
+  cleanAuthor,
+  cleanDescription,
   isValidBookTitle,
-  visitCatalogPage,
-  addAuthorDetails
+  isValidProductUrl,
+  persistCatalog,
 };

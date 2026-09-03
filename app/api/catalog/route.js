@@ -26,10 +26,11 @@ const getAdminDb = () => {
 let catalogCache = null;
 let catalogCacheVersion = null;
 
+// Force dynamic execution to prevent build-time prerendering errors with request URL parameters
 export const dynamic = "force-dynamic";
 
-// Cache for 7 days to align with once-weekly scrape (Monday 2 AM UTC)
-const CATALOG_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
+// Cache for 3.5 days (84 hours / 302,400,000 ms) to align with twice-weekly syncs (Mon/Thu 02:00 UTC)
+const CATALOG_CACHE_TTL = 3.5 * 24 * 60 * 60 * 1000;
 
 export async function GET(request) {
   try {
@@ -38,7 +39,10 @@ export async function GET(request) {
       return NextResponse.json({ error: "Firebase Admin is not configured" }, { status: 503 });
     }
 
-    const bookId = new URL(request.url).searchParams.get("id");
+    const { searchParams } = new URL(request.url);
+    const bookId = searchParams.get("id");
+
+    // Single book lookup by ID
     if (bookId) {
       const book = await db.collection("books").doc(bookId).get();
       return book.exists
@@ -46,21 +50,27 @@ export async function GET(request) {
         : NextResponse.json({ error: "Book not found" }, { status: 404 });
     }
 
-    const version = new URL(request.url).searchParams.get("version") || "current";
+    // Catalog-wide request with 3.5-day (84-hour) cache revalidation
+    const version = searchParams.get("version") || "current";
     const cacheIsFresh = catalogCache && Date.now() - catalogCache.createdAt < CATALOG_CACHE_TTL;
+
     if (cacheIsFresh && catalogCacheVersion === version) {
       return NextResponse.json(catalogCache.books, {
-        headers: { "Cache-Control": "public, s-maxage=604800, stale-while-revalidate=86400" }
+        headers: {
+          "Cache-Control": "public, s-maxage=302400, stale-while-revalidate=86400"
+        }
       });
     }
 
     const snapshot = await db.collection("books").get();
     const books = snapshot.docs.map((book) => ({ id: book.id, ...book.data() }));
+
     catalogCache = { books, createdAt: Date.now() };
     catalogCacheVersion = version;
+
     return NextResponse.json(books, {
       headers: {
-        "Cache-Control": "public, s-maxage=604800, stale-while-revalidate=86400"
+        "Cache-Control": "public, s-maxage=302400, stale-while-revalidate=86400"
       }
     });
   } catch (error) {
