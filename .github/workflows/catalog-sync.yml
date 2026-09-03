@@ -16,6 +16,8 @@ jobs:
       FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
       FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
       SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+      REVALIDATION_SECRET_TOKEN: ${{ secrets.REVALIDATION_SECRET_TOKEN }}
+      NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
 
     steps:
       - name: Check out repository
