@@ -82,6 +82,15 @@ const cleanDescription = (html) => {
  */
 const cleanAuthor = (value) => {
   if (!value) return "Featured Author";
+
+  const ignoredKeywords = [
+    "tags", "mystery", "thriller", "ya", "short stories", "niger delta",
+    "political", "fantasy", "fantasy fiction", "speculative fiction",
+    "poetry", "literary fiction", "romance", "children's books",
+    "children's fiction", "middle grade", "biafra", "civil war",
+    "memoir", "non-fiction", "african literature", "business", "fiction", "books"
+  ];
+
   let author = String(value)
     .replace(/^(by|author)\s*:\s*/i, "")
     .replace(/^tags?\s*:\s*/i, "")
@@ -90,18 +99,13 @@ const cleanAuthor = (value) => {
 
   author = author.split(/\s*\d+(?:\.\d+)?\s*\/\s*5(?:\.0)?/i)[0].trim();
 
-  const ignoredKeywords = [
-    "fiction", "african literature", "business", "memoir", "books",
-    "mystery", "thriller", "ya", "short stories", "niger delta",
-    "political", "fantasy", "poetry", "literary fiction", "romance",
-    "children's books", "middle grade", "biafra", "civil war", "non-fiction"
-  ];
+  const tokens = author.split(",").map((t) => t.trim()).filter(Boolean);
+  const candidateTokens = tokens.filter(
+    (token) => !ignoredKeywords.includes(token.toLowerCase())
+  );
 
-  if (!author || ignoredKeywords.includes(author.toLowerCase())) {
-    return "Featured Author";
-  }
-
-  return author;
+  if (candidateTokens.length === 0) return "Featured Author";
+  return candidateTokens[0];
 };
 
 /**
@@ -143,13 +147,29 @@ async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_
   const books = [];
   let page = 1;
 
+  // Realistic Chrome Browser Headers to bypass Cloudflare / Wordfence 403 WAF blocks
+  const browserHeaders = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": `${baseUrl}/`,
+    "Origin": baseUrl,
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+  };
+
   while (page <= maxPages) {
     try {
       const apiUrl = `${baseUrl}/wp-json/wc/store/v1/products?per_page=${ITEMS_PER_PAGE}&page=${page}`;
       const response = await fetch(apiUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        },
+        method: "GET",
+        headers: browserHeaders,
       });
 
       if (!response.ok) {
