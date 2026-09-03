@@ -8,24 +8,24 @@
 
 const fs = require("fs");
 const path = require("path");
-const admin = require("firebase-admin");
+const { initializeApp, cert, getApps } = require("firebase-admin/app");
+const { getFirestore } = require("firebase-admin/firestore");
 const { loadEnvConfig } = require("@next/env");
 const { BOOK_CATEGORIES, classifyBookCategory } = require("../lib/categoryTaxonomy");
 
 // Load environment variables from project root
 loadEnvConfig(path.join(__dirname, ".."));
 
-// Initialize Firebase Admin SDK safely across CommonJS / ESM wrappers
-const existingApps = admin.apps || admin.default?.apps;
-if (!existingApps?.length && process.env.FIREBASE_PROJECT_ID) {
-  const initializeApp = admin.initializeApp || admin.default?.initializeApp;
-  const credential = admin.credential || admin.default?.credential;
-
+// Initialize Firebase Admin SDK safely using subpath imports
+if (!getApps().length && process.env.FIREBASE_PROJECT_ID) {
   initializeApp({
-    credential: credential.cert({
+    credential: cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+      privateKey: process.env.FIREBASE_PRIVATE_KEY
+        ?.trim()
+        .replace(/^['"]|['"]$/g, "")
+        .replace(/\\n/g, "\n"),
     }),
   });
 }
@@ -262,10 +262,9 @@ async function main() {
   persistCatalog(combined);
 
   // 2. Direct Sync to Firestore if Admin SDK credentials are active
-  const dbInstance = admin.firestore || admin.default?.firestore;
-  if (existingApps?.length && dbInstance && combined.length > 0) {
+  if (getApps().length && combined.length > 0) {
     console.log("Uploading catalog records directly to Firestore...");
-    const db = dbInstance();
+    const db = getFirestore();
     const batch = db.batch();
     
     combined.forEach((book) => {
