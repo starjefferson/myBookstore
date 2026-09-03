@@ -147,7 +147,6 @@ async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_
   const books = [];
   let page = 1;
 
-  // Realistic Chrome Browser Headers to bypass Cloudflare / Wordfence 403 WAF blocks
   const browserHeaders = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
@@ -184,7 +183,6 @@ async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_
       }
 
       for (const item of products) {
-        // Convert minor price units (kobo/cents) to Naira
         const rawPrice = parseInt(item.prices?.price || "0", 10) / 100;
         const vendorPrice = rawPrice > 0 ? rawPrice : null;
         const retailPrice = calculateRetailPrice(vendorPrice);
@@ -271,7 +269,7 @@ async function main() {
   console.log(`📦 Batch Size: ${ITEMS_PER_PAGE} items per page`);
   console.log("=========================================");
 
-  // Fetch from each vendor via REST API
+  // Fetch from each vendor via REST API independently
   const rovingBooks = await fetchWooCommerceVendor("https://rhbooks.com.ng", "rovingheights");
   const retalaBooks = await fetchWooCommerceVendor("https://retala.com.ng", "retala");
   const masobeBooks = await fetchWooCommerceVendor("https://masobebooks.com/ng", "masobe");
