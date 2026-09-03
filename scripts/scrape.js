@@ -142,6 +142,10 @@ const generateDescription = (item) => {
 /**
  * Fetches vendor catalog via WooCommerce REST API with dynamic complete-catalog pagination
  */
+/**
+ * Fetches vendor catalog via WooCommerce REST API with dynamic complete-catalog pagination
+ * Includes automatic retry logic and extended 30s timeout for proxy stability
+ */
 async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_PER_VENDOR) {
   console.log(`--> Fetching REST API catalog from ${vendorSlug} (${baseUrl}) at ${ITEMS_PER_PAGE} items/page...`);
   const books = [];
@@ -160,79 +164,87 @@ async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_
   const apiKey = process.env.SCRAPER_API_KEY;
 
   while (page <= maxPages) {
-    try {
-      const targetApiUrl = `${baseUrl}/wp-json/wc/store/v1/products?per_page=${ITEMS_PER_PAGE}&page=${page}`;
-      
-      // Route Rovingheights through ScraperAPI or fallback proxy
-      let requestUrl = targetApiUrl;
-      if (vendorSlug === "rovingheights") {
-        requestUrl = apiKey
-          ? `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(targetApiUrl)}`
-          : `https://api.allorigins.win/raw?url=${encodeURIComponent(targetApiUrl)}`;
-      }
+    let attempts = 0;
+    const maxAttempts = 3;
+    let products = null;
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 20000);
+    const targetApiUrl = `${baseUrl}/wp-json/wc/store/v1/products?per_page=${ITEMS_PER_PAGE}&page=${page}`;
+    let requestUrl = targetApiUrl;
+    if (vendorSlug === "rovingheights" && apiKey) {
+      requestUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(targetApiUrl)}`;
+    }
 
-      const response = await fetch(requestUrl, {
-        method: "GET",
-        headers: browserHeaders,
-        signal: controller.signal,
-      });
+    // Retry loop per page
+    while (attempts < maxAttempts) {
+      attempts++;
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000); // Extended to 30 seconds
 
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        console.warn(`  ⚠ ${vendorSlug} API page ${page} returned status ${response.status}. Ending pagination.`);
-        break;
-      }
-
-      const products = await response.json();
-      if (!Array.isArray(products) || products.length === 0) {
-        console.log(`  ✓ ${vendorSlug}: Full catalog complete at page ${page - 1}.`);
-        break;
-      }
-
-      for (const item of products) {
-        const rawPrice = parseInt(item.prices?.price || "0", 10) / 100;
-        const vendorPrice = rawPrice > 0 ? rawPrice : null;
-        const retailPrice = calculateRetailPrice(vendorPrice);
-
-        const desc = generateDescription(item);
-        const coverImage = item.images?.[0]?.src || "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=800";
-        const authorText = item.images?.[0]?.alt || item.categories?.[0]?.name || "";
-        const author = cleanAuthor(authorText);
-        const slug = item.slug || item.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-
-        const rawCategory = item.categories?.[0]?.name || "General";
-        const classifiedCategory = classifyBookCategory 
-          ? classifyBookCategory({ title: item.name, description: desc, category: rawCategory }) 
-          : rawCategory;
-
-        books.push({
-          id: `${vendorSlug}-${page}-${slug}`,
-          title: item.name,
-          author: author,
-          description: desc,
-          coverImage: coverImage,
-          vendorPrice: vendorPrice,
-          retailPrice: retailPrice,
-          sourceVendor: vendorSlug,
-          sourceUrl: item.permalink || `${baseUrl}/product/${slug}/`,
-          category: classifiedCategory,
-          inStock: item.is_in_stock ?? true,
-          stockQuantity: item.low_stock_remaining !== undefined ? item.low_stock_remaining : null,
-          rating: 4.8,
-          updatedAt: new Date().toISOString(),
+        const response = await fetch(requestUrl, {
+          method: "GET",
+          headers: browserHeaders,
+          signal: controller.signal,
         });
-      }
 
-      console.log(`  ✓ ${vendorSlug} Page ${page}: Fetched ${products.length} items.`);
-      page++;
-    } catch (err) {
-      console.warn(`  ⚠ Error fetching ${vendorSlug} page ${page}:`, err.message);
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          console.warn(`  ⚠ ${vendorSlug} API page ${page} returned status ${response.status} (Attempt ${attempts}/${maxAttempts})`);
+          if (attempts < maxAttempts) await new Promise((res) => setTimeout(res, 2000));
+          continue;
+        }
+
+        products = await response.json();
+        break; // Success, exit retry loop
+      } catch (err) {
+        console.warn(`  ⚠ Error fetching ${vendorSlug} page ${page} (Attempt ${attempts}/${maxAttempts}): ${err.message}`);
+        if (attempts < maxAttempts) await new Promise((res) => setTimeout(res, 2000));
+      }
+    }
+
+    // If all retries failed or catalog reached end
+    if (!products || !Array.isArray(products) || products.length === 0) {
+      console.log(`  ✓ ${vendorSlug}: Catalog pagination complete at page ${page - 1}.`);
       break;
     }
+
+    for (const item of products) {
+      const rawPrice = parseInt(item.prices?.price || "0", 10) / 100;
+      const vendorPrice = rawPrice > 0 ? rawPrice : null;
+      const retailPrice = calculateRetailPrice(vendorPrice);
+
+      const desc = generateDescription(item);
+      const coverImage = item.images?.[0]?.src || "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=800";
+      const authorText = item.images?.[0]?.alt || item.categories?.[0]?.name || "";
+      const author = cleanAuthor(authorText);
+      const slug = item.slug || item.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+      const rawCategory = item.categories?.[0]?.name || "General";
+      const classifiedCategory = classifyBookCategory 
+        ? classifyBookCategory({ title: item.name, description: desc, category: rawCategory }) 
+        : rawCategory;
+
+      books.push({
+        id: `${vendorSlug}-${page}-${slug}`,
+        title: item.name,
+        author: author,
+        description: desc,
+        coverImage: coverImage,
+        vendorPrice: vendorPrice,
+        retailPrice: retailPrice,
+        sourceVendor: vendorSlug,
+        sourceUrl: item.permalink || `${baseUrl}/product/${slug}/`,
+        category: classifiedCategory,
+        inStock: item.is_in_stock ?? true,
+        stockQuantity: item.low_stock_remaining !== undefined ? item.low_stock_remaining : null,
+        rating: 4.8,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    console.log(`  ✓ ${vendorSlug} Page ${page}: Fetched ${products.length} items.`);
+    page++;
   }
 
   return books;
