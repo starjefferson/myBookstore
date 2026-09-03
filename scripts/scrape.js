@@ -146,6 +146,10 @@ const generateDescription = (item) => {
  * Fetches vendor catalog via WooCommerce REST API with dynamic complete-catalog pagination
  * Includes automatic retry logic and extended 30s timeout for proxy stability
  */
+/**
+ * Fetches vendor catalog via WooCommerce REST API
+ * Features page skipping on error, inter-page throttling, and exponential retries
+ */
 async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_PER_VENDOR) {
   console.log(`--> Fetching REST API catalog from ${vendorSlug} (${baseUrl}) at ${ITEMS_PER_PAGE} items/page...`);
   const books = [];
@@ -170,16 +174,19 @@ async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_
 
     const targetApiUrl = `${baseUrl}/wp-json/wc/store/v1/products?per_page=${ITEMS_PER_PAGE}&page=${page}`;
     let requestUrl = targetApiUrl;
-    if (vendorSlug === "rovingheights" && apiKey) {
+    const isProxyRequest = vendorSlug === "rovingheights" && apiKey;
+
+    if (isProxyRequest) {
       requestUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(targetApiUrl)}`;
     }
 
-    // Retry loop per page
+    // Retry loop per page with exponential backoff
     while (attempts < maxAttempts) {
       attempts++;
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000); // Extended to 30 seconds
+        const timeoutMs = isProxyRequest ? 45000 : 25000;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
         const response = await fetch(requestUrl, {
           method: "GET",
@@ -191,24 +198,37 @@ async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_
 
         if (!response.ok) {
           console.warn(`  ⚠ ${vendorSlug} API page ${page} returned status ${response.status} (Attempt ${attempts}/${maxAttempts})`);
-          if (attempts < maxAttempts) await new Promise((res) => setTimeout(res, 2000));
+          if (attempts < maxAttempts) {
+            await new Promise((res) => setTimeout(res, 4000 * attempts));
+          }
           continue;
         }
 
         products = await response.json();
-        break; // Success, exit retry loop
+        break; // Request succeeded
       } catch (err) {
         console.warn(`  ⚠ Error fetching ${vendorSlug} page ${page} (Attempt ${attempts}/${maxAttempts}): ${err.message}`);
-        if (attempts < maxAttempts) await new Promise((res) => setTimeout(res, 2000));
+        if (attempts < maxAttempts) {
+          await new Promise((res) => setTimeout(res, 4000 * attempts));
+        }
       }
     }
 
-    // If all retries failed or catalog reached end
-    if (!products || !Array.isArray(products) || products.length === 0) {
+    // 1. IF PAGE FAILED ALL RETRIES: Skip this page and continue to the next one
+    if (products === null) {
+      console.warn(`  ⚠ Skipping ${vendorSlug} page ${page} due to persistent errors; moving to page ${page + 1}...`);
+      page++;
+      if (isProxyRequest) await new Promise((res) => setTimeout(res, 2000));
+      continue;
+    }
+
+    // 2. IF CATALOG ENDED: WooCommerce returned a valid empty array []
+    if (Array.isArray(products) && products.length === 0) {
       console.log(`  ✓ ${vendorSlug}: Catalog pagination complete at page ${page - 1}.`);
       break;
     }
 
+    // Process valid products on successful page
     for (const item of products) {
       const rawPrice = parseInt(item.prices?.price || "0", 10) / 100;
       const vendorPrice = rawPrice > 0 ? rawPrice : null;
@@ -245,6 +265,11 @@ async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_
 
     console.log(`  ✓ ${vendorSlug} Page ${page}: Fetched ${products.length} items.`);
     page++;
+
+    // Throttling pause to respect rate limits
+    if (isProxyRequest) {
+      await new Promise((res) => setTimeout(res, 1500));
+    }
   }
 
   return books;
