@@ -4,40 +4,55 @@ import { getFirestore } from "firebase-admin/firestore";
 import { unstable_cache } from "next/cache";
 
 const getAdminDb = () => {
-  if (!process.env.FIREBASE_PROJECT_ID || !process.env.FIREBASE_CLIENT_EMAIL || !process.env.FIREBASE_PRIVATE_KEY) {
+  const projectId = process.env.FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  const privateKey = process.env.FIREBASE_PRIVATE_KEY;
+
+  if (!projectId || !clientEmail || !privateKey) {
+    console.error("Missing Firebase Admin Environment Variables");
     return null;
   }
+
+  const formattedPrivateKey = privateKey
+    .trim()
+    .replace(/^['"]|['"]$/g, "")
+    .replace(/\\n/g, "\n");
 
   const app = getApps().length
     ? getApps()[0]
     : initializeApp({
         credential: cert({
-          projectId: process.env.FIREBASE_PROJECT_ID,
-          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-          privateKey: process.env.FIREBASE_PRIVATE_KEY
-            .trim()
-            .replace(/^['"]|['"]$/g, "")
-            .replace(/\\n/g, "\n")
-        })
+          projectId,
+          clientEmail,
+          privateKey: formattedPrivateKey,
+        }),
       });
 
   return getFirestore(app);
 };
 
-// Force dynamic execution to prevent build-time prerendering errors with request URL parameters
 export const dynamic = "force-dynamic";
 
 /**
  * Next.js Tagged Data Cache wrapper.
- * Responds to revalidateTag("catalog") and revalidateTag("books") in /api/revalidate.
+ * Sanitizes Firestore documents into plain JSON before caching to prevent serialization errors.
  */
 const getCachedCatalog = unstable_cache(
   async () => {
     const db = getAdminDb();
-    if (!db) return null;
+    if (!db) {
+      throw new Error("Firebase Admin SDK failed to initialize. Check environment variables.");
+    }
 
     const snapshot = await db.collection("books").get();
-    return snapshot.docs.map((book) => ({ id: book.id, ...book.data() }));
+
+    // Convert Firestore DocumentData and Timestamps into plain JSON primitives
+    const rawBooks = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    return JSON.parse(JSON.stringify(rawBooks));
   },
   ["full-catalog-list"],
   {
@@ -50,7 +65,10 @@ export async function GET(request) {
   try {
     const db = getAdminDb();
     if (!db) {
-      return NextResponse.json({ error: "Firebase Admin is not configured" }, { status: 503 });
+      return NextResponse.json(
+        { error: "Firebase Admin is not configured on Vercel" },
+        { status: 503 }
+      );
     }
 
     const { searchParams } = new URL(request.url);
@@ -59,25 +77,34 @@ export async function GET(request) {
     // Single book lookup by ID
     if (bookId) {
       const book = await db.collection("books").doc(bookId).get();
-      return book.exists
-        ? NextResponse.json({ id: book.id, ...book.data() })
-        : NextResponse.json({ error: "Book not found" }, { status: 404 });
+      if (!book.exists) {
+        return NextResponse.json({ error: "Book not found" }, { status: 404 });
+      }
+      return NextResponse.json(
+        JSON.parse(JSON.stringify({ id: book.id, ...book.data() }))
+      );
     }
 
     // Fetch catalog via Next.js Data Cache
     const books = await getCachedCatalog();
 
     if (!books) {
-      return NextResponse.json({ error: "Unable to load catalog from Firestore" }, { status: 500 });
+      return NextResponse.json(
+        { error: "Unable to load catalog from Firestore" },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json(books, {
       headers: {
-        "Cache-Control": "public, s-maxage=302400, stale-while-revalidate=86400"
-      }
+        "Cache-Control": "public, s-maxage=302400, stale-while-revalidate=86400",
+      },
     });
   } catch (error) {
-    console.error("Catalog API error:", error);
-    return NextResponse.json({ error: "Unable to load catalog from Firestore" }, { status: 500 });
+    console.error("Catalog API Error Trace:", error?.stack || error);
+    return NextResponse.json(
+      { error: "Unable to load catalog from Firestore" },
+      { status: 500 }
+    );
   }
 }
