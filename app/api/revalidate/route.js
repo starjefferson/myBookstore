@@ -1,4 +1,4 @@
-import { revalidatePath } from "next/cache";
+import { revalidatePath, revalidateTag } from "next/cache";
 import { NextResponse } from "next/server";
 
 export async function POST(request) {
@@ -11,16 +11,22 @@ export async function POST(request) {
       return NextResponse.json({ error: "Invalid revalidation secret token" }, { status: 401 });
     }
 
-    // 2. Purge Next.js CDN Edge Cache for the catalog API and storefront homepage
-    revalidatePath("/api/catalog");
-    revalidatePath("/");
+    // 2. Purge Next.js Data Cache tags for catalog and metadata
+    revalidateTag("catalog");
+    revalidateTag("books");
+    revalidateTag("catalogMeta");
 
-    console.log("✓ Next.js CDN Edge Cache purged successfully via Webhook.");
+    // 3. Purge route path layouts
+    revalidatePath("/api/catalog");
+    revalidatePath("/api/catalogVersion");
+    revalidatePath("/", "layout");
+
+    console.log("✓ Next.js CDN Edge, Layouts, and Data Caches purged successfully via Webhook.");
 
     return NextResponse.json({
       revalidated: true,
       now: Date.now(),
-      message: "Catalog API cache invalidated successfully.",
+      message: "Catalog API, Version Meta, and UI cache invalidated successfully.",
     });
   } catch (error) {
     console.error("Revalidation endpoint error:", error);
