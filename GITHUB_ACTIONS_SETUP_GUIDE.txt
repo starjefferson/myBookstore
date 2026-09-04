@@ -1,48 +1,70 @@
-DIGITAL CONCIERGE BOOKSTORE
-GITHUB ACTIONS REST API SCRAPE AND FIRESTORE SETUP GUIDE
+================================================================================
+DIGITAL CONCIERGE BOOKSTORE — REST API SCRAPE & FIRESTORE SETUP GUIDE
+================================================================================
+Target Vendors:
+1. Rovingheights Books -> https://rhbooks.com.ng (Routed via ScraperAPI proxy)
+2. Retala Books        -> https://retala.com.ng (Direct WooCommerce REST API)
+3. Masobe Books        -> https://masobebooks.com/ng (Direct WooCommerce REST API)
+
+Script Locations: /scripts/scrape.js & /scripts/seed.js
+Workflow File:    /.github/workflows/scrape-catalog.yml
+API Endpoint:     /app/api/revalidate/route.js
+Runtime Environment: Node.js 22 + Firebase Admin SDK + ScraperAPI
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+1. What This Automation Does & System Architecture
+2. Local Development Workflow
+3. Before Setting Up GitHub Actions & Prerequisites
+4. Part 1: Push Project Code to GitHub
+5. Part 2: Configure Repository Secrets (Firebase, Proxy, Revalidation)
+6. Part 3: GitHub Actions Workflow Settings (.github/workflows/scrape-catalog.yml)
+7. Part 4: Manual Execution & Verification
+8. How to Read Actions Execution Logs
+9. Viewing Generated Catalog Artifacts
+10. Error Handling & Retry / Skip Logic
+11. Firestore Safety & Quota Optimization
+12. Automated Next.js Cache Revalidation Engine
+13. Vercel Environment Configuration
+14. Quick Checklist for Production Launch
+15. Summary of Standard Terminal Commands
 
 ================================================================================
-WHAT THIS AUTOMATION DOES
+1. WHAT THIS AUTOMATION DOES & SYSTEM ARCHITECTURE
 ================================================================================
-
-This project has two separate, decoupled commands[cite: 1, 2]:
+This project uses a decoupled two-step ingestion and seeding pipeline:
 
   node scripts/scrape.js
 
-This queries the WooCommerce REST APIs for all three configured vendors (Masobe Books, 
-Rovingheights, and Retala) and saves the collected catalog locally to[cite: 1, 2]:
+Queries WooCommerce REST APIs across all three vendors (Masobe, Rovingheights, 
+and Retala) in batches of 24 items per page. It saves local catalog snapshots to:
 
   scraped_catalog.json
   lib/categoryFilters.json
 
   node scripts/seed.js
 
-This reads scraped_catalog.json and performs quota-safe batch updates to upload 
-those books to Firebase Firestore[cite: 1, 2].
+Reads scraped_catalog.json and performs quota-safe batch upserts to Firebase 
+Firestore. Upon successful database writes, it fires a POST webhook call to 
+/api/revalidate to automatically purge the Next.js API cache.
 
-GitHub Actions runs these commands automatically on a temporary cloud runner[cite: 1]:
+GitHub Actions runs these commands automatically on a cloud runner twice a week:
 
-  1. Download the repository code[cite: 1].
-  2. Install Node.js 22 and project packages (npm ci)[cite: 1].
-  3. Run scrape.js (fetches REST APIs; routes Rovingheights via ScraperAPI)[cite: 1].
-  4. If scraping succeeds, run seed.js (batch upserts catalog and shipping zones)[cite: 1].
-  5. Save a copy of the scraped JSON files as workflow artifacts[cite: 1].
+  1. Download the repository code.
+  2. Install Node.js 22 and project dependencies (npm ci).
+  3. Execute scrape.js (routes Rovingheights via ScraperAPI to bypass WAF).
+  4. If scraping succeeds, execute seed.js (batch upserts catalog & shipping zones).
+  5. Fire the Next.js revalidation webhook to instantly update live API caches.
+  6. Upload scraped JSON files as workflow artifacts.
 
 The workflow is located at:
-
   .github/workflows/scrape-catalog.yml
 
-All three vendors (Rovingheights, Retala, and Masobe) are fully enabled and active[cite: 1]. 
-Rovingheights is routed through ScraperAPI's proxy pool to bypass Cloudflare WAF 
-blocking on cloud runners[cite: 1].
-
 ================================================================================
-IMPORTANT: LOCAL DEVELOPMENT STILL WORKS
+2. LOCAL DEVELOPMENT WORKFLOW
 ================================================================================
-
-Yes. You can continue running the commands locally on your development machine[cite: 1].
-
-From the project folder, use:
+You can continue running the commands locally on your development machine:
 
   node --env-file=.env.local scripts/scrape.js
 
@@ -51,59 +73,53 @@ After checking the generated scraped_catalog.json, upload it manually with:
   node --env-file=.env.local scripts/seed.js
 
 The npm equivalents are:
-
   npm run scrape
   npm run seed
 
-However, because the standard npm scripts do not automatically load .env.local on 
+However, because standard npm scripts may not automatically load .env.local on 
 older Node setups, use the explicit node --env-file=.env.local commands above unless 
-your environment variables are already loaded another way[cite: 1].
+your environment variables are loaded another way.
 
-The recommended local workflow is:
+Recommended local workflow:
+  1. Run scrape.js.
+  2. Wait for "Catalog ingestion complete".
+  3. Inspect scraped_catalog.json for book count, vendor, and author values.
+  4. Run seed.js only when you are ready to update Firestore and invalidate cache.
 
-  1. Run scrape.js[cite: 1].
-  2. Wait for "Catalog ingestion complete"[cite: 1].
-  3. Inspect scraped_catalog.json for book count, vendor, and author values[cite: 1].
-  4. Run seed.js only when you are ready to update Firestore[cite: 1].
-
-The scraper does not write to Firestore[cite: 1, 2]. The seeder is the only command 
-that writes the catalog to Firestore[cite: 1, 2].
+The scraper does not write to Firestore. The seeder is the only script that writes 
+the catalog to Firestore.
 
 ================================================================================
-BEFORE SETTING UP GITHUB ACTIONS
+3. BEFORE SETTING UP GITHUB ACTIONS
 ================================================================================
-
 You need:
-
-  - A GitHub account[cite: 1].
-  - This project pushed to a GitHub repository[cite: 1].
-  - The repository must contain package.json and package-lock.json[cite: 1].
-  - A Firebase project with Firestore enabled[cite: 1].
-  - Firebase Admin credentials for server-side Firestore access[cite: 1].
-  - A free ScraperAPI key (for Rovingheights proxying)[cite: 1].
+  - A GitHub account.
+  - This project pushed to a GitHub repository.
+  - The repository must contain package.json and package-lock.json.
+  - A Firebase project with Firestore enabled.
+  - Firebase Admin credentials for server-side Firestore access.
+  - A ScraperAPI key (for Rovingheights proxying).
+  - A custom REVALIDATION_SECRET_TOKEN generated by you.
 
 Never commit .env.local, Firebase private keys, or service-account JSON files to 
-GitHub[cite: 1]. Anyone who gets the private key may be able to access your database[cite: 1].
+GitHub. Anyone who obtains the private key may gain full access to your database.
 
 ================================================================================
 PART 1: PUSH THE PROJECT TO GITHUB
 ================================================================================
-
 If the project is not already on GitHub:
 
-  1. Go to https://github.com and sign in[cite: 1].
-  2. Click the + button in the top-right corner[cite: 1].
-  3. Select New repository[cite: 1].
-  4. Give it a name, for example digital-concierge-bookstore[cite: 1].
-  5. Choose Private unless you deliberately want the source code public[cite: 1].
-  6. Create the repository[cite: 1].
+  1. Go to https://github.com and sign in.
+  2. Click the + button in the top-right corner.
+  3. Select New repository.
+  4. Name it (e.g., digital-concierge-bookstore).
+  5. Choose Private unless you deliberately want source code public.
+  6. Create the repository.
 
-From the project folder in PowerShell, check the current Git state[cite: 1]:
-
+From the project folder in terminal, check Git status:
   git status
 
-If Git has not been initialized yet[cite: 1]:
-
+If Git has not been initialized yet:
   git init
   git add .
   git commit -m "Initial bookstore project"
@@ -111,11 +127,7 @@ If Git has not been initialized yet[cite: 1]:
   git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
   git push -u origin main
 
-If Git is already initialized, do not run git init again[cite: 1]. Add the GitHub remote 
-shown on the repository page, then push your existing branch[cite: 1].
-
-Before pushing, confirm that .gitignore excludes secrets[cite: 1]:
-
+Confirm that .gitignore excludes secrets:
   .env.local
   .env*
   !.env.example
@@ -123,92 +135,91 @@ Before pushing, confirm that .gitignore excludes secrets[cite: 1]:
   .next/
 
 ================================================================================
-PART 2: ADD GITHUB ACTIONS SECRETS
+PART 2: CONFIGURE REPOSITORY SECRETS
 ================================================================================
+The workflow requires six repository secrets under GitHub Repo -> Settings -> 
+Secrets and variables -> Actions -> New repository secret:
 
-The workflow needs four repository secrets[cite: 1]. These are different from normal 
-GitHub login credentials[cite: 1].
+  1. FIREBASE_PROJECT_ID: Your Firebase project ID string.
+  2. FIREBASE_CLIENT_EMAIL: Service account client email.
+  3. FIREBASE_PRIVATE_KEY: Full RSA key including -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY-----.
+  4. SCRAPER_API_KEY: Your ScraperAPI account key (for Cloudflare bypass).
+  5. REVALIDATION_SECRET_TOKEN: Your custom secret passkey (e.g. my_secret_token_2026).
+  6. NEXT_PUBLIC_APP_URL: Your production domain (e.g. https://your-domain.vercel.app).
 
-  FIREBASE_PROJECT_ID
-  FIREBASE_CLIENT_EMAIL
-  FIREBASE_PRIVATE_KEY
-  SCRAPER_API_KEY
-
-To add them:
-
-  1. Open the GitHub repository in your browser[cite: 1].
-  2. Click Settings[cite: 1].
-  3. In the left menu, open Secrets and variables[cite: 1].
-  4. Click Actions[cite: 1].
-  5. Click New repository secret[cite: 1].
-  6. Enter the exact secret name[cite: 1].
-  7. Paste the matching value[cite: 1].
-  8. Click Add secret[cite: 1].
-  9. Repeat for all four values[cite: 1].
-
-Use the values already in your local .env.local[cite: 1]:
-
-  FIREBASE_PROJECT_ID=your-project-id
-  FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@your-project-id.iam.gserviceaccount.com
-  FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n..."
-  SCRAPER_API_KEY=your_scraper_api_key_here
-
-For FIREBASE_PRIVATE_KEY, paste the complete private key, including[cite: 1]:
-
-  -----BEGIN PRIVATE KEY-----
-  -----END PRIVATE KEY-----
-
-Do not paste the variable name into the value field[cite: 1]. The value field should contain 
-only the value[cite: 1]. GitHub masks secrets in normal logs, but do not print them yourself[cite: 1].
+Do not paste variable names into value fields. GitHub masks secrets in logs, 
+so avoid printing them in your code.
 
 ================================================================================
 PART 3: CHECK THE WORKFLOW FILE
 ================================================================================
+Location: `.github/workflows/scrape-catalog.yml`
 
-The repository contains[cite: 1]:
+name: Catalog Scrape and Seed
 
-  .github/workflows/scrape-catalog.yml
-
-Its important settings are[cite: 1]:
-
+on:
   schedule:
+    # Runs twice a week: Mondays & Thursdays at 02:00 UTC (03:00 WAT)
     - cron: "0 2 * * 1,4"
+  workflow_dispatch:
 
-This means:
+jobs:
+  catalog-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
-  - Runs twice a week: Mondays and Thursdays at 02:00 UTC (03:00 WAT)[cite: 1].
-  - Uses Node.js 22 runtime for fast execution and dependency stability[cite: 1].
-  - Passes SCRAPER_API_KEY to scrape.js so Rovingheights bypasses Cloudflare[cite: 1].
-  - Runs pure Node REST API queries (no heavy Playwright binary downloads)[cite: 1].
+    env:
+      FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+      FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
+      FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
+      SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+      REVALIDATION_SECRET_TOKEN: ${{ secrets.REVALIDATION_SECRET_TOKEN }}
+      NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
 
-GitHub Actions uses UTC, not your local Nigerian time[cite: 1]. Scheduled runs may start 
-a few minutes after the exact cron minute depending on GitHub queue traffic[cite: 1].
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-It also includes workflow_dispatch, which provides a button for starting a run 
-manually at any time[cite: 1].
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run REST Catalog Ingestion Engine
+        run: node scripts/scrape.js
+
+      - name: Seed Firestore
+        run: node scripts/seed.js
+
+      - name: Upload catalog snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraped-catalog-${{ github.run_id }}
+          path: |
+            scraped_catalog.json
+            lib/categoryFilters.json
+          if-no-files-found: ignore
+          retention-days: 14
 
 ================================================================================
 PART 4: RUN IT MANUALLY THE FIRST TIME
 ================================================================================
+1. Push workflow and updated scripts to GitHub:
+   git add .github/workflows/scrape-catalog.yml scripts/scrape.js scripts/seed.js app/api/revalidate/route.js
+   git commit -m "feat(workflow): add REST engine, ScraperAPI, and automated cache revalidation"
+   git push origin main
 
-Do this before waiting for the schedule:
+2. Open repository on GitHub -> click Actions tab.
+3. Select "Catalog Scrape and Seed" in left column.
+4. Click Run workflow -> select `main` branch -> click green "Run workflow" button.
+5. Click the new run to monitor progress.
 
-  1. Push the workflow file and updated scripts to GitHub[cite: 1]:
-
-       git add .github/workflows/scrape-catalog.yml scripts/scrape.js scripts/seed.js
-       git commit -m "feat(workflow): enable REST engine with ScraperAPI and quota-safe seeding"
-       git push origin main
-
-  2. Open the repository on GitHub[cite: 1].
-  3. Click the Actions tab[cite: 1].
-  4. Select Catalog Scrape and Seed in the left column[cite: 1].
-  5. Click Run workflow[cite: 1].
-  6. Select the main branch[cite: 1].
-  7. Click the green Run workflow button[cite: 1].
-  8. Click the new run to monitor its progress[cite: 1].
-
-A successful run will show these stages[cite: 1]:
-
+Successful run stages:
   - Check out repository
   - Set up Node.js
   - Install dependencies
@@ -216,139 +227,148 @@ A successful run will show these stages[cite: 1]:
   - Seed Firestore
   - Upload catalog snapshot
 
-The Seed Firestore step runs only if the scrape step succeeds[cite: 1]. This prevents 
-an incomplete scrape from being uploaded[cite: 1].
-
 ================================================================================
-HOW TO READ THE ACTIONS LOG
+HOW TO READ ACTIONS EXECUTION LOGS
 ================================================================================
+Click any step to expand its log.
 
-Click any step to expand its log[cite: 1].
-
-During scraping, expected output includes messages such as[cite: 1]:
-
+Scraping step output:
   🚀 Starting WooCommerce REST API Catalog Ingestion...
   📦 Batch Size: 24 items per page
   --> Fetching REST API catalog from rovingheights...
     ✓ rovingheights Page 1: Fetched 24 items.
-    ✓ rovingheights Page 2: Fetched 24 items.
   --> Fetching REST API catalog from retala...
     ✓ retala Page 1: Fetched 24 items.
   --> Fetching REST API catalog from masobe...
     ✓ masobe Page 1: Fetched 24 items.
-  ✓ Saved checkpoint: 1374 valid books written to scraped_catalog.json & categoryFilters.json
+  ✓ Saved checkpoint: 2574 valid books written to scraped_catalog.json & categoryFilters.json
   ✅ Catalog ingestion complete.
 
-During seeding, expected output includes[cite: 1]:
-
+Seeding step output:
   🌱 Digital Concierge Bookstore Seeder
-  ✓ Loaded 1374 entries from scraped_catalog.json
+  ✓ Loaded 2574 scraped catalog entries from scraped_catalog.json
   ✓ Wrote 37 shipping zones to Firestore.
     ✓ Synced batch 1 (450 books)
     ✓ Synced batch 2 (450 books)
-    ✓ Synced batch 3 (450 books)
-  ✅ Firestore seeding complete. Updated 1374 books.
+    ...
+  ✓ Updated catalogMeta/current version metadata.
+  ✅ All seed data successfully written to Firestore.
+  --> Triggering automated API cache revalidation...
+  ✅ Next.js API cache purged automatically. Live catalog is now updated!
 
 ================================================================================
-VIEWING THE GENERATED CATALOG
+VIEWING GENERATED CATALOG ARTIFACTS
 ================================================================================
-
-The GitHub runner is temporary, so its files are not automatically committed back 
-to your Git repository[cite: 1]. The workflow uploads these files as an artifact[cite: 1]:
-
+Workflow files are uploaded as downloadable artifacts:
   scraped_catalog.json
   lib/categoryFilters.json
 
-To download them[cite: 1]:
-
-  1. Open the completed workflow run in GitHub Actions[cite: 1].
-  2. Scroll to the bottom of the run summary page[cite: 1].
-  3. Find Artifacts[cite: 1].
-  4. Download the scraped-catalog artifact zip[cite: 1].
-
-The artifact is retained for 14 days by the current workflow[cite: 1].
+To download:
+  1. Open completed workflow run in GitHub Actions.
+  2. Scroll to bottom of run summary page.
+  3. Find Artifacts section.
+  4. Download scraped-catalog artifact zip.
+  Artifacts are retained for 14 days.
 
 ================================================================================
-WHAT HAPPENS IF THE ACTION FAILS
+ERROR HANDLING & RETRY / SKIP LOGIC
 ================================================================================
+1. Transient Proxy Delays:
+   scrape.js uses a 45-second timeout for ScraperAPI proxy calls and 25-second 
+   for direct calls, with exponential retry backoff (4s, 8s, 12s) across 3 attempts.
 
-If scraping fails[cite: 1]:
+2. Failed Page Skipping:
+   If a page fails all 3 attempts, scrape.js logs a warning, skips that page, 
+   and continues to page + 1. It only stops when WooCommerce returns an empty array [].
 
-  - The Seed Firestore step does not run[cite: 1].
-  - Firestore is not altered by that workflow run[cite: 1].
-  - Check if your SCRAPER_API_KEY secret is set correctly in GitHub[cite: 1].
-
-If seeding fails[cite: 1]:
-
-  - The scrape step completed successfully and uploaded the artifact[cite: 1].
-  - Check if your daily Firebase quota was exhausted (Spark Plan limit: 20,000 writes/day)[cite: 1].
-  - The seeder uses `{ merge: true }`, so re-running the workflow updates documents cleanly[cite: 1, 2].
-
-================================================================================
-FIRESTORE SAFETY AND QUOTA OPTIMIZATION
-================================================================================
-
-The seeder is designed specifically to preserve your free-tier Firebase quota[cite: 1]:
-
-  1. Zero Read Operations: seed.js does NOT call `db.collection("books").get()`[cite: 1]. 
-     This saves tens of thousands of read operations per sync[cite: 1].
-  2. Chunked Batch Writes: Writes are split into chunks of 450 items per batch, well 
-     below Firestore's 500-operation limit per batch request[cite: 1].
-  3. Stable Document IDs: Each book uses a predictable ID (`vendor-page-slug`), so 
-     repeating a seed updates existing entries rather than creating duplicate books[cite: 1].
+3. Inter-page Throttling:
+   Enforces a 1.5-second pause between proxy requests to prevent hitting ScraperAPI 
+   rate limits or concurrency locks.
 
 ================================================================================
-LOCAL DEVELOPMENT VS PRODUCTION
+FIRESTORE SAFETY & QUOTA OPTIMIZATION
 ================================================================================
+1. Zero Read Operations: seed.js does NOT call db.collection("books").get(). 
+   Saves thousands of read ops per sync, preventing free-tier quota depletion.
 
-LOCAL DEVELOPMENT
+2. Chunked Batch Writes: Writes are split into chunks of 450 items per batch 
+   (below Firestore's 500 operation limit per batch request).
 
-Use this when testing pricing calculations, category taxonomy, or local changes[cite: 1]:
+3. Stable Document IDs: Predictable IDs (`vendor-page-slug`) ensure repeat seeds 
+   update existing documents via `{ merge: true }` without creating duplicates.
 
-  node --env-file=.env.local scripts/scrape.js
+================================================================================
+AUTOMATED NEXT.JS CACHE REVALIDATION ENGINE
+================================================================================
+To make Firestore updates reflect immediately on the frontend without waiting 
+for time-based TTL expiration:
 
-Review the resulting JSON, then[cite: 1]:
+1. Webhook Endpoint (`app/api/revalidate/route.js`):
+   Secured with REVALIDATION_SECRET_TOKEN. Calls `revalidatePath('/api/catalog')` 
+   and `revalidatePath('/')` to instantly flush CDN edge and route memory caches.
 
-  node --env-file=.env.local scripts/seed.js
+2. Automatic Execution:
+   At the end of `seed.js`, `triggerApiRevalidation()` sends an HTTP POST request 
+   to `${NEXT_PUBLIC_APP_URL}/api/revalidate?secret=${REVALIDATION_SECRET_TOKEN}`.
 
-PRODUCTION GITHUB ACTIONS
+3. Result:
+   The moment seeding finishes, cache is cleared. Next browser refresh loads 
+   the fresh Firestore dataset instantly.
 
-Use the Actions workflow for scheduled, hands-off automated updates[cite: 1]. GitHub supplies 
-the environment variables directly from repository secrets[cite: 1]:
+================================================================================
+VERCEL ENVIRONMENT CONFIGURATION
+================================================================================
+Categorize variables correctly in Vercel Dashboard -> Settings -> Environment Variables:
 
-  Local:      .env.local on your computer[cite: 1]
-  Production: GitHub Actions repository secrets[cite: 1]
+Public Client-Side Variables (Prefix: NEXT_PUBLIC_ | Type: Config):
+  - NEXT_PUBLIC_FIREBASE_API_KEY
+  - NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+  - NEXT_PUBLIC_FIREBASE_PROJECT_ID
+  - NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+  - NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+  - NEXT_PUBLIC_FIREBASE_APP_ID
+  - NEXT_PUBLIC_PAYSTACK_PUBLIC_KEY
+  - NEXT_PUBLIC_APP_URL
+
+Private Server-Side Secrets (NO NEXT_PUBLIC_ | Type: Secret / Encrypted):
+  - FIREBASE_PROJECT_ID
+  - FIREBASE_CLIENT_EMAIL
+  - FIREBASE_PRIVATE_KEY
+  - PAYSTACK_SECRET_KEY
+  - RESEND_API_KEY
+  - SCRAPER_API_KEY
+  - REVALIDATION_SECRET_TOKEN
+
+Redeploy in Vercel after saving settings to compile with new variables.
 
 ================================================================================
 QUICK CHECKLIST FOR PRODUCTION LAUNCH
 ================================================================================
-
-  [ ] Project code is pushed to `main` branch on GitHub[cite: 1].
-  [ ] `.env.local` is listed in `.gitignore`[cite: 1].
-  [ ] `FIREBASE_PROJECT_ID` secret is added to GitHub Secrets[cite: 1].
-  [ ] `FIREBASE_CLIENT_EMAIL` secret is added to GitHub Secrets[cite: 1].
-  [ ] `FIREBASE_PRIVATE_KEY` secret is added to GitHub Secrets[cite: 1].
-  [ ] `SCRAPER_API_KEY` secret is added to GitHub Secrets[cite: 1].
-  [ ] Workflow file `.github/workflows/scrape-catalog.yml` exists[cite: 1].
-  [ ] First manual workflow run triggered and verified in Actions tab[cite: 1].
-  [ ] Scrape step completed successfully[cite: 1].
-  [ ] Seed step completed successfully[cite: 1].
-  [ ] Downloaded workflow artifact zip verified[cite: 1].
+  [ ] Project code pushed to `main` branch on GitHub.
+  [ ] `.env.local` listed in `.gitignore`.
+  [ ] `FIREBASE_PROJECT_ID` secret added to GitHub Secrets.
+  [ ] `FIREBASE_CLIENT_EMAIL` secret added to GitHub Secrets.
+  [ ] `FIREBASE_PRIVATE_KEY` secret added to GitHub Secrets.
+  [ ] `SCRAPER_API_KEY` secret added to GitHub Secrets.
+  [ ] `REVALIDATION_SECRET_TOKEN` secret added to GitHub Secrets & Vercel.
+  [ ] `NEXT_PUBLIC_APP_URL` added to GitHub Secrets & Vercel.
+  [ ] `app/api/revalidate/route.js` endpoint created.
+  [ ] First manual workflow run triggered and verified in Actions tab.
+  [ ] Scrape step completed successfully.
+  [ ] Seed step completed successfully.
+  [ ] Revalidation log confirmed in Actions summary.
+  [ ] Live app refreshed and verified with fresh catalog data.
 
 ================================================================================
-NORMAL COMMANDS SUMMARY
+SUMMARY OF STANDARD TERMINAL COMMANDS
 ================================================================================
-
 Local scrape only:
-
   node --env-file=.env.local scripts/scrape.js
 
-Local Firestore seed only:
-
+Local Firestore seed & cache revalidate:
   node --env-file=.env.local scripts/seed.js
 
 Production:
-
   Open GitHub -> Actions -> Catalog Scrape and Seed -> Run workflow
 
 ================================================================================

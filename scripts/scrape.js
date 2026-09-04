@@ -1,7 +1,8 @@
 /**
  * Standalone REST API Catalog Ingestion Engine
- * Syncs catalog data from Masobe Books, Rovingheights, and Retala into Firestore & JSON
+ * Syncs catalog data from Masobe Books, Rovingheights, and Retala into JSON & Firestore
  * Batch Size: 24 items per page via WooCommerce REST APIs
+ * Concurrency: 3 pages fetched in parallel per batch window
  * Run via cron / CLI: node scripts/scrape.js
  * Cron schedule: Twice per week (Mon/Thu 2:00 AM UTC)
  */
@@ -32,8 +33,9 @@ if (!getApps().length && process.env.FIREBASE_PROJECT_ID) {
 
 // Configurable constants
 const RETAIL_MARKUP_PERCENT = 0.10; // 10% Retail Markup
-const ITEMS_PER_PAGE = 24; // 24 items per page request
-const MAX_PAGES_PER_VENDOR = Number(process.env.MAX_PAGES) || 500; // Raised to 500 to fetch full catalogs
+const ITEMS_PER_PAGE = 100; // 24 items per page request
+const MAX_PAGES_PER_VENDOR = Number(process.env.MAX_PAGES) || 500;
+const CONCURRENCY_LIMIT = 3; // Fetch 3 pages concurrently per batch window
 
 /**
  * Calculates retail price with 10% markup rounded up to nearest ₦100
@@ -140,20 +142,16 @@ const generateDescription = (item) => {
 };
 
 /**
- * Fetches vendor catalog via WooCommerce REST API with dynamic complete-catalog pagination
- */
-/**
- * Fetches vendor catalog via WooCommerce REST API with dynamic complete-catalog pagination
- * Includes automatic retry logic and extended 30s timeout for proxy stability
- */
-/**
- * Fetches vendor catalog via WooCommerce REST API
- * Features page skipping on error, inter-page throttling, and exponential retries
+ * Fetches vendor catalog via WooCommerce REST API in concurrent page batches
+ * Features ScraperAPI proxy routing, exponential retries, and page skipping
  */
 async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_PER_VENDOR) {
   console.log(`--> Fetching REST API catalog from ${vendorSlug} (${baseUrl}) at ${ITEMS_PER_PAGE} items/page...`);
   const books = [];
   let page = 1;
+
+  const apiKey = process.env.SCRAPER_API_KEY;
+  const isProxyRequest = vendorSlug === "rovingheights" && apiKey;
 
   const browserHeaders = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -165,110 +163,131 @@ async function fetchWooCommerceVendor(baseUrl, vendorSlug, maxPages = MAX_PAGES_
     "Pragma": "no-cache",
   };
 
-  const apiKey = process.env.SCRAPER_API_KEY;
-
   while (page <= maxPages) {
-    let attempts = 0;
-    const maxAttempts = 3;
-    let products = null;
-
-    const targetApiUrl = `${baseUrl}/wp-json/wc/store/v1/products?per_page=${ITEMS_PER_PAGE}&page=${page}`;
-    let requestUrl = targetApiUrl;
-    const isProxyRequest = vendorSlug === "rovingheights" && apiKey;
-
-    if (isProxyRequest) {
-      requestUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(targetApiUrl)}`;
+    // 1. Build concurrent page batch (e.g. pages 1, 2, 3)
+    const batchPages = [];
+    for (let i = 0; i < CONCURRENCY_LIMIT && (page + i) <= maxPages; i++) {
+      batchPages.push(page + i);
     }
 
-    // Retry loop per page with exponential backoff
-    while (attempts < maxAttempts) {
-      attempts++;
-      try {
-        const controller = new AbortController();
-        const timeoutMs = isProxyRequest ? 45000 : 25000;
-        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    // 2. Execute parallel page requests
+    const batchResults = await Promise.all(
+      batchPages.map(async (pageNum) => {
+        let attempts = 0;
+        const maxAttempts = 3;
+        let products = null;
 
-        const response = await fetch(requestUrl, {
-          method: "GET",
-          headers: browserHeaders,
-          signal: controller.signal,
-        });
+        const targetApiUrl = `${baseUrl}/wp-json/wc/store/v1/products?per_page=${ITEMS_PER_PAGE}&page=${pageNum}`;
+        let requestUrl = targetApiUrl;
 
-        clearTimeout(timeoutId);
+        if (isProxyRequest) {
+          requestUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(targetApiUrl)}`;
+        }
 
-        if (!response.ok) {
-          console.warn(`  ⚠ ${vendorSlug} API page ${page} returned status ${response.status} (Attempt ${attempts}/${maxAttempts})`);
-          if (attempts < maxAttempts) {
-            await new Promise((res) => setTimeout(res, 4000 * attempts));
+        while (attempts < maxAttempts) {
+          attempts++;
+          try {
+            const controller = new AbortController();
+            const timeoutMs = isProxyRequest ? 45000 : 25000;
+            const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+            const response = await fetch(requestUrl, {
+              method: "GET",
+              headers: browserHeaders,
+              signal: controller.signal,
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+              console.warn(`  ⚠ ${vendorSlug} API page ${pageNum} returned status ${response.status} (Attempt ${attempts}/${maxAttempts})`);
+              if (attempts < maxAttempts) {
+                await new Promise((res) => setTimeout(res, 3000 * attempts));
+              }
+              continue;
+            }
+
+            products = await response.json();
+            break; // Success
+          } catch (err) {
+            console.warn(`  ⚠ Error fetching ${vendorSlug} page ${pageNum} (Attempt ${attempts}/${maxAttempts}): ${err.message}`);
+            if (attempts < maxAttempts) {
+              await new Promise((res) => setTimeout(res, 3000 * attempts));
+            }
           }
-          continue;
         }
 
-        products = await response.json();
-        break; // Request succeeded
-      } catch (err) {
-        console.warn(`  ⚠ Error fetching ${vendorSlug} page ${page} (Attempt ${attempts}/${maxAttempts}): ${err.message}`);
-        if (attempts < maxAttempts) {
-          await new Promise((res) => setTimeout(res, 4000 * attempts));
+        return { pageNum, products };
+      })
+    );
+
+    let reachedCatalogEnd = false;
+
+    // 3. Process results in sequential order
+    for (const result of batchResults) {
+      const { pageNum, products } = result;
+
+      // Page failed all retries: Skip page and continue
+      if (products === null) {
+        console.warn(`  ⚠ Skipping ${vendorSlug} page ${pageNum} due to persistent errors; continuing ingestion...`);
+        continue;
+      }
+
+      // WooCommerce returned empty array []: Reached catalog end
+      if (Array.isArray(products) && products.length === 0) {
+        console.log(`  ✓ ${vendorSlug}: Catalog pagination complete at page ${pageNum - 1}.`);
+        reachedCatalogEnd = true;
+        break;
+      }
+
+      if (Array.isArray(products)) {
+        for (const item of products) {
+          const rawPrice = parseInt(item.prices?.price || "0", 10) / 100;
+          const vendorPrice = rawPrice > 0 ? rawPrice : null;
+          const retailPrice = calculateRetailPrice(vendorPrice);
+
+          const desc = generateDescription(item);
+          const coverImage = item.images?.[0]?.src || "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=800";
+          const authorText = item.images?.[0]?.alt || item.categories?.[0]?.name || "";
+          const author = cleanAuthor(authorText);
+          const slug = item.slug || item.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+
+          const rawCategory = item.categories?.[0]?.name || "General";
+          const classifiedCategory = classifyBookCategory 
+            ? classifyBookCategory({ title: item.name, description: desc, category: rawCategory }) 
+            : rawCategory;
+
+          books.push({
+            id: `${vendorSlug}-${pageNum}-${slug}`,
+            title: item.name,
+            author: author,
+            description: desc,
+            coverImage: coverImage,
+            vendorPrice: vendorPrice,
+            retailPrice: retailPrice,
+            sourceVendor: vendorSlug,
+            sourceUrl: item.permalink || `${baseUrl}/product/${slug}/`,
+            category: classifiedCategory,
+            inStock: item.is_in_stock ?? true,
+            stockQuantity: item.low_stock_remaining !== undefined ? item.low_stock_remaining : null,
+            rating: 4.8,
+            updatedAt: new Date().toISOString(),
+          });
         }
+
+        console.log(`  ✓ ${vendorSlug} Page ${pageNum}: Fetched ${products.length} items.`);
       }
     }
 
-    // 1. IF PAGE FAILED ALL RETRIES: Skip this page and continue to the next one
-    if (products === null) {
-      console.warn(`  ⚠ Skipping ${vendorSlug} page ${page} due to persistent errors; moving to page ${page + 1}...`);
-      page++;
-      if (isProxyRequest) await new Promise((res) => setTimeout(res, 2000));
-      continue;
-    }
+    if (reachedCatalogEnd) break;
 
-    // 2. IF CATALOG ENDED: WooCommerce returned a valid empty array []
-    if (Array.isArray(products) && products.length === 0) {
-      console.log(`  ✓ ${vendorSlug}: Catalog pagination complete at page ${page - 1}.`);
-      break;
-    }
+    page += batchPages.length;
 
-    // Process valid products on successful page
-    for (const item of products) {
-      const rawPrice = parseInt(item.prices?.price || "0", 10) / 100;
-      const vendorPrice = rawPrice > 0 ? rawPrice : null;
-      const retailPrice = calculateRetailPrice(vendorPrice);
-
-      const desc = generateDescription(item);
-      const coverImage = item.images?.[0]?.src || "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&q=80&w=800";
-      const authorText = item.images?.[0]?.alt || item.categories?.[0]?.name || "";
-      const author = cleanAuthor(authorText);
-      const slug = item.slug || item.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-
-      const rawCategory = item.categories?.[0]?.name || "General";
-      const classifiedCategory = classifyBookCategory 
-        ? classifyBookCategory({ title: item.name, description: desc, category: rawCategory }) 
-        : rawCategory;
-
-      books.push({
-        id: `${vendorSlug}-${page}-${slug}`,
-        title: item.name,
-        author: author,
-        description: desc,
-        coverImage: coverImage,
-        vendorPrice: vendorPrice,
-        retailPrice: retailPrice,
-        sourceVendor: vendorSlug,
-        sourceUrl: item.permalink || `${baseUrl}/product/${slug}/`,
-        category: classifiedCategory,
-        inStock: item.is_in_stock ?? true,
-        stockQuantity: item.low_stock_remaining !== undefined ? item.low_stock_remaining : null,
-        rating: 4.8,
-        updatedAt: new Date().toISOString(),
-      });
-    }
-
-    console.log(`  ✓ ${vendorSlug} Page ${page}: Fetched ${products.length} items.`);
-    page++;
-
-    // Throttling pause to respect rate limits
+    // Inter-batch throttle pause
     if (isProxyRequest) {
-      await new Promise((res) => setTimeout(res, 1500));
+      await new Promise((res) => setTimeout(res, 1200));
+    } else {
+      await new Promise((res) => setTimeout(res, 400));
     }
   }
 
@@ -314,7 +333,7 @@ function persistCatalog(books) {
 async function main() {
   console.log("=========================================");
   console.log("🚀 Starting WooCommerce REST API Catalog Ingestion...");
-  console.log(`📦 Batch Size: ${ITEMS_PER_PAGE} items per page`);
+  console.log(`📦 Batch Size: ${ITEMS_PER_PAGE} items per page (3 pages parallel)`);
   console.log("=========================================");
 
   // Fetch full catalogs from all vendors
