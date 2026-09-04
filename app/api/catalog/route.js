@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { cert, getApps, initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
-import { unstable_cache } from "next/cache";
 
 const getAdminDb = () => {
   const projectId = process.env.FIREBASE_PROJECT_ID;
@@ -33,34 +32,6 @@ const getAdminDb = () => {
 
 export const dynamic = "force-dynamic";
 
-/**
- * Next.js Tagged Data Cache wrapper.
- * Sanitizes Firestore documents into plain JSON before caching to prevent serialization errors.
- */
-const getCachedCatalog = unstable_cache(
-  async () => {
-    const db = getAdminDb();
-    if (!db) {
-      throw new Error("Firebase Admin SDK failed to initialize. Check environment variables.");
-    }
-
-    const snapshot = await db.collection("books").get();
-
-    // Convert Firestore DocumentData and Timestamps into plain JSON primitives
-    const rawBooks = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    return JSON.parse(JSON.stringify(rawBooks));
-  },
-  ["full-catalog-list"],
-  {
-    revalidate: 302400, // 3.5 days fallback TTL
-    tags: ["catalog", "books"],
-  }
-);
-
 export async function GET(request) {
   try {
     const db = getAdminDb();
@@ -85,25 +56,28 @@ export async function GET(request) {
       );
     }
 
-    // Fetch catalog via Next.js Data Cache
-    const books = await getCachedCatalog();
+    // Direct Firestore fetch — bypasses unstable_cache payload size limits
+    const snapshot = await db.collection("books").get();
 
-    if (!books) {
-      return NextResponse.json(
-        { error: "Unable to load catalog from Firestore" },
-        { status: 500 }
-      );
-    }
+    const rawBooks = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    // Convert Firestore Timestamps and complex objects into standard JSON primitives
+    const books = JSON.parse(JSON.stringify(rawBooks));
 
     return NextResponse.json(books, {
       headers: {
+        // Cache on Vercel Edge CDN for 3.5 days (302,400s) to align with Mondays & Thursdays 02:00 UTC syncs
+        // revalidatePath("/api/catalog") in /api/revalidate purges this Edge CDN cache on demand
         "Cache-Control": "public, s-maxage=302400, stale-while-revalidate=86400",
       },
     });
   } catch (error) {
     console.error("Catalog API Error Trace:", error?.stack || error);
     return NextResponse.json(
-      { error: "Unable to load catalog from Firestore" },
+      { error: "Unable to load catalog from Firestore", details: error?.message },
       { status: 500 }
     );
   }

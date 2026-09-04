@@ -1,7 +1,7 @@
 /**
  * Standalone Firebase Firestore Seeder
  * Ingests scraped_catalog.json, zones.js, and mockData.js directly into Firestore
- * Performs Delta Sync and triggers automatic Next.js API cache revalidation
+ * Performs Delta Sync (only writes new or modified books to preserve Firestore write quota)
  * Run via CLI / GitHub Actions: node scripts/seed.js
  */
 
@@ -11,10 +11,8 @@ const { loadEnvConfig } = require("@next/env");
 const fs = require("fs");
 const path = require("path");
 
-// Load environment variables from project root
 loadEnvConfig(path.join(__dirname, ".."));
 
-// Initialize Firebase Admin SDK safely
 if (!getApps().length && process.env.FIREBASE_PROJECT_ID) {
   initializeApp({
     credential: cert({
@@ -29,36 +27,6 @@ if (!getApps().length && process.env.FIREBASE_PROJECT_ID) {
 }
 
 const db = getFirestore();
-
-/**
- * Triggers Next.js On-Demand Revalidation Webhook
- */
-async function triggerApiRevalidation() {
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.VERCEL_URL;
-  const secret = process.env.REVALIDATION_SECRET_TOKEN;
-
-  if (!appUrl || !secret) {
-    console.log("⚠ Skipping automated cache revalidation: NEXT_PUBLIC_APP_URL or REVALIDATION_SECRET_TOKEN is missing.");
-    return;
-  }
-
-  const normalizedUrl = appUrl.startsWith("http") ? appUrl : `https://${appUrl}`;
-  const revalidateEndpoint = `${normalizedUrl}/api/revalidate?secret=${secret}`;
-
-  try {
-    console.log(`\n--> Triggering automated API cache revalidation at ${normalizedUrl}...`);
-    const res = await fetch(revalidateEndpoint, { method: "POST" });
-    const data = await res.json();
-
-    if (res.ok) {
-      console.log("✅ Next.js API cache purged automatically. Live catalog is now updated!");
-    } else {
-      console.warn("⚠ Cache revalidation warning:", data.error || data.message);
-    }
-  } catch (err) {
-    console.warn("⚠ Could not reach revalidation endpoint:", err.message);
-  }
-}
 
 async function seed() {
   console.log("==========================================");
@@ -93,35 +61,79 @@ async function seed() {
       console.log(`✓ Wrote ${SHIPPING_ZONES.length} shipping zones to Firestore.`);
     }
 
-    // 2. Write books to Firestore in batches (450 items per batch to save quota)
+    // 2. Delta Sync: Only write new or changed books to Firestore
     if (scrapedBooks.length > 0) {
-      console.log("--> Syncing books to Firestore...");
-      const BATCH_SIZE = 450;
-      for (let i = 0; i < scrapedBooks.length; i += BATCH_SIZE) {
-        const chunk = scrapedBooks.slice(i, i + BATCH_SIZE);
-        const batch = db.batch();
+      console.log("--> Fetching existing catalog snapshot for diff calculation...");
+      const existingSnapshot = await db.collection("books").get();
+      const existingBooks = new Map();
 
-        chunk.forEach((book) => {
-          const docRef = db.collection("books").doc(book.id);
-          batch.set(docRef, book, { merge: true });
+      existingSnapshot.docs.forEach((doc) => {
+        const data = doc.data();
+        existingBooks.set(doc.id, {
+          title: data.title,
+          author: data.author,
+          vendorPrice: data.vendorPrice,
+          retailPrice: data.retailPrice,
+          description: data.description,
+          coverImage: data.coverImage,
+          inStock: data.inStock,
+          stockQuantity: data.stockQuantity,
+          category: data.category,
         });
+      });
 
-        await batch.commit();
-        console.log(`  ✓ Synced batch ${Math.floor(i / BATCH_SIZE) + 1} (${chunk.length} books)`);
+      const newBooks = [];
+      const changedBooks = [];
+
+      scrapedBooks.forEach((book) => {
+        if (!existingBooks.has(book.id)) {
+          newBooks.push(book);
+        } else {
+          const existing = existingBooks.get(book.id);
+          const hasChanges =
+            existing.vendorPrice !== book.vendorPrice ||
+            existing.retailPrice !== book.retailPrice ||
+            existing.description !== book.description ||
+            existing.coverImage !== book.coverImage ||
+            existing.inStock !== book.inStock ||
+            existing.stockQuantity !== book.stockQuantity ||
+            existing.title !== book.title ||
+            existing.author !== book.author ||
+            existing.category !== book.category;
+
+          if (hasChanges) {
+            changedBooks.push(book);
+          }
+        }
+      });
+
+      const booksToWrite = [...newBooks, ...changedBooks];
+      if (booksToWrite.length > 0) {
+        for (let start = 0; start < booksToWrite.length; start += 400) {
+          const bookBatch = db.batch();
+          booksToWrite.slice(start, start + 400).forEach((book) => {
+            const docRef = db.collection("books").doc(book.id);
+            bookBatch.set(docRef, book, { merge: true });
+          });
+          await bookBatch.commit();
+        }
+        console.log(
+          `✓ Delta sync complete: ${newBooks.length} new books, ${changedBooks.length} updated books written to Firestore.`
+        );
+      } else {
+        console.log(`✓ Delta sync complete: No changes detected. Firestore catalog is up to date.`);
       }
 
-      // Update catalog metadata version document
-      const currentVersion = new Date().toISOString();
+      // Update catalog metadata version
       await db.collection("catalogMeta").doc("current").set(
         {
-          version: currentVersion,
-          updatedAt: currentVersion,
+          version: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
           bookCount: scrapedBooks.length,
-          lastSyncMethod: "WooCommerce REST API Engine",
         },
         { merge: true }
       );
-      console.log(`✓ Updated catalogMeta/current version metadata (${currentVersion}).`);
+      console.log(`✓ Updated catalogMeta/current version metadata.`);
     }
 
     // 3. Seed Sample Orders
@@ -137,18 +149,11 @@ async function seed() {
       console.log(`✓ Wrote ${INITIAL_ORDERS.length} sample orders to Firestore.`);
     }
 
-    console.log("\n✅ All seed data successfully written to Firestore.");
-
-    // 4. Trigger Automatic Cache Invalidation
-    await triggerApiRevalidation();
+    console.log("\n✅ All seed data successfully synchronized with Firestore.");
   } catch (err) {
     console.error("Seed execution error:", err);
     process.exitCode = 1;
   }
 }
 
-if (require.main === module) {
-  seed();
-}
-
-module.exports = { seed };
+seed();
